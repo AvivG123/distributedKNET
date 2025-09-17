@@ -3,7 +3,8 @@ import torch
 import random
 import numpy as np
 import networkx as nx
-from torch.func import jacfwd
+from torch.func import jacfwd, jacrev
+from torch.autograd.functional import jacobian
 from torch_geometric.data import Data, Dataset
 
 
@@ -69,19 +70,21 @@ class CreateGraph:
 
 
 class FSystem:
-    def __init__(self):
-        self.f = lambda x: torch.sin(x) + x
+    def __init__(self, alpha=1, beta=1, sigma=0, delta=0, deg=0):
+        self.f = lambda x: x + alpha * torch.sin(beta * x + sigma * np.pi) + delta
+        self.rotation_matrix = torch.tensor(
+            [[np.cos(deg), -1*np.sin(deg)], [np.sin(deg), np.cos(deg)]], dtype=torch.float)
 
-    def func(self, x):
+    def __call__(self, x):
         if isinstance(x, np.ndarray):
-            x = torch.tensor(x)
-            return self.f(x).numpy()
-        return self.f(x)
+            x = torch.tensor(x, dtype=torch.float)
+            return (self.rotation_matrix @ self.f(x)).numpy()
+        return self.rotation_matrix @ self.f(x)
 
     def jacobian(self, x):
         flag = 0
         if isinstance(x, np.ndarray):
-            x = torch.Tensor(x)
+            x = torch.tensor(x, dtype=torch.float)
             flag = 1
         f_jac = torch.vmap(jacfwd(self.f))
         if flag:
@@ -89,23 +92,62 @@ class FSystem:
         return f_jac(x)
 
 
+class FSystemLinear:
+    def __init__(self, eps=0.015, deg=0):
+        A0 = 2 * torch.tensor([[0, -1], [1, 0]])
+        self.A = torch.eye(2) + eps * A0 + (((eps * A0) ** 2) / 2) + (((eps * A0) ** 3) / 6)
+        self.rotation_matrix = torch.tensor(
+            [[np.cos(deg), -1*np.sin(deg)], [np.sin(deg), np.cos(deg)]], dtype=torch.float)
+
+    def __call__(self, x):
+        if isinstance(x, np.ndarray):
+            x = torch.tensor(x, dtype=torch.float)
+            return (self.rotation_matrix @ self.A @ x).numpy()
+        return self.rotation_matrix @ self.A @ x
+
+    def jacobian(self, x):
+        flag = 0
+        if isinstance(x, np.ndarray):
+            x = torch.tensor(x, dtype=torch.float)
+            flag = 1
+        A = self.rotation_matrix @ self.A
+        if flag:
+            return A.numpy()[None, ...].repeat(x.shape[0], axis=0)
+        return A[None, ...].repeat_interleave(x.shape[0], dim=0)
+
+
 class HSystem:
-    def __init__(self, node_num):
+    def __init__(self, node_num, alpha=0):
         # self.h2 = lambda x: torch.tensor([1., 0.]) @ ((x ** 2) ** 0.6)
+        self.rotation_matrix = torch.tensor(
+            [[np.cos(alpha), -1*np.sin(alpha)], [np.sin(alpha), np.cos(alpha)]], dtype=torch.float)
         self.node_classification = torch.tensor(np.random.binomial(1, 0.5, (node_num, 1)), dtype=torch.float)
 
     def h1(self, x):
         x = x.to(torch.float)
-        return torch.tensor([[0., 1.],], dtype=torch.float) @ (x ** 2) ** 0.6
+        return torch.tensor([[0., 1.],], dtype=torch.float) @  self.rotation_matrix @ (torch.sign(x) * (x ** 2) ** 0.6)
 
     def h2(self, x):
         x = x.to(torch.float)
-        return torch.tensor([[1., 0.],], dtype=torch.float) @ (x * torch.tanh(x))
+        return torch.tensor([[1., 0.],], dtype=torch.float) @ self.rotation_matrix @ (x + torch.arctan(x))
 
     def func(self, x, n_expansions=0):
         flag = 0
         if isinstance(x, np.ndarray):
-            x = torch.Tensor(x)
+            x = torch.tensor(x, dtype=torch.float)
+            flag = 1
+        node_classification = self.node_classification
+        for i in range(n_expansions):
+            node_classification = node_classification[:, None]
+        result = node_classification * self.h1(x) + (1 - node_classification) * self.h2(x)
+        if flag:
+            return result.numpy()
+        return result
+
+    def __call__(self, x, n_expansions=0):
+        flag = 0
+        if isinstance(x, np.ndarray):
+            x = torch.tensor(x, dtype=torch.float)
             flag = 1
         node_classification = self.node_classification
         for i in range(n_expansions):
@@ -118,7 +160,7 @@ class HSystem:
     def jacobian(self, x, n_expansions=0):
         flag = 0
         if isinstance(x, np.ndarray):
-            x = torch.Tensor(x)
+            x = torch.tensor(x, dtype=torch.float)
             flag = 1
         h1_jac = torch.vmap(jacfwd(self.h1))
         h2_jac = torch.vmap(jacfwd(self.h2))
@@ -131,48 +173,78 @@ class HSystem:
         return result
 
 
+class HSystemLinear:
+    def __init__(self, node_num, p=0.5, h1=None, h2=None):
+        if h1 is None:
+            h1 = [[0., 1.],]
+        if h2 is None:
+            h2 = [[1., 0.],]
+        self.node_classification = torch.tensor(np.random.binomial(1, p, (node_num, 1)), dtype=torch.float)
+        self.h1_matrix = torch.tensor(h1, dtype=torch.float)
+        self.h2_matrix = torch.tensor(h2, dtype=torch.float)
+        # self.H = self.node_classification * h1_matrix + (1 - self.node_classification) * h2_matrix
+
+    def __call__(self, x, n_expansions=0):
+        flag = 0
+        if isinstance(x, np.ndarray):
+            x = torch.Tensor(x)
+            flag = 1
+        node_classification = self.node_classification
+        for i in range(n_expansions):
+            node_classification = node_classification[..., None]
+        H = node_classification * self.h1_matrix + (1 - node_classification) * self.h2_matrix
+        result = H @ x
+        if flag:
+            return result.numpy()
+        return result
+
+    def jacobian(self, x, n_expansions=0):
+        flag = 0
+        if isinstance(x, np.ndarray):
+            x = torch.Tensor(x)
+            flag = 1
+        node_classification = self.node_classification
+        for i in range(n_expansions):
+            node_classification = node_classification[..., None]
+        H = node_classification * self.h1_matrix + (1 - node_classification) * self.h2_matrix
+        H = H.transpose(1, 2)[None, None, ...]
+        if flag:
+            return H.numpy().repeat(x.shape[0], axis=0)
+        return H.repeat_interleave(x.shape[0], dim=0)
+
+
 class GraphDataset(Dataset):
     def __init__(
             self, g, f_system, h_system, q, r_array, monte_carlo_simulations=1000,
-            time_steps=100, n_expansions=0, mean=None, std=None
+            time_steps=100, n_expansions=0, x0=10
     ):
         super(GraphDataset, self).__init__()
         self.g = g
-        self.f = f_system.func
-        self.h = h_system.func
-        self.q = q
         self.r_array = r_array
         self.monte_carlo_simulations = monte_carlo_simulations
         self.time_steps = time_steps
-        self.x0 = (10 * np.ones((self.monte_carlo_simulations, 2, 1), dtype=np.float32) +
+        self.x0 = (x0 * np.ones((self.monte_carlo_simulations, 2, 1), dtype=np.float32) +
                    np.random.randn(self.monte_carlo_simulations, 2, 1))
-        self.data_points = generate_data_points(self.f, self.q, self.x0, self.time_steps)
-        self.mean = mean
-        self.std = std
-        self.measurements = self.generate_measurements(n_expansions)
+        self.data_points = generate_data_points(f_system, q, self.x0, self.time_steps)
+        self.measurements = self.generate_measurements(h_system, n_expansions)
+        self.h_system = h_system
         self.data = self.create_dataset()
 
-    def generate_measurements(self, n_expansions):
+    def generate_measurements(self, h_func, n_expansions):
         data_to_pass = self.data_points.transpose(1, 2, -1, 0).reshape(2, -1)
-        measurements = generate_measurements(self.h, data_to_pass, self.r_array, n_expansions)
+        measurements = generate_measurements(h_func, data_to_pass, self.r_array, n_expansions)
         measurements = measurements.reshape(self.g.graph.number_of_nodes(), 1, self.time_steps, self.monte_carlo_simulations)
         measurements = measurements.transpose(3, 0, 2, 1)
         return measurements
 
-    def normalize_data(self, data):
-        if self.mean is None and self.std is None:
-            self.mean = np.mean(data, axis=(0, 2))[None, :, None, ...]
-            self.std = np.std(data, axis=(0, 2))[None, :, None, ...]
-        return (data - self.mean) / self.std
-
     def create_dataset(self):
         data_list = []
         for idx in range(self.monte_carlo_simulations):
-            data = Data(x=torch.tensor(self.measurements[idx, ...], dtype=torch.float64),
+            data = Data(x=torch.tensor(self.measurements[idx, ...], dtype=torch.float),
                         edge_index=torch.tensor(np.array(self.g.edges).T, dtype=torch.int64),
-                        y=torch.tensor(self.data_points[idx, ...].transpose(-1, 0, 1), dtype=torch.float64),
-                        edge_attr=torch.randn(self.g.graph.number_of_edges(), 1, dtype=torch.float64),
-                        adj_matrix=torch.Tensor(self.g.adj_matrix))
+                        y=torch.tensor(self.data_points[idx, ...].transpose(-1, 0, 1), dtype=torch.float),
+                        edge_attr=torch.randn(self.g.graph.number_of_edges(), 1, dtype=torch.float),
+                        adj_matrix=torch.Tensor(self.g.adj_matrix), h_system=self.h_system)
             data_list.append(data)
         return data_list
 
