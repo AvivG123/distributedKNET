@@ -205,7 +205,11 @@ class GraphKalmanFilter(torch.nn.Module):
             phi_pred_t_t = x_pred_t_t_1.float() + node_kalman_reshaped.float() @ edge_kalman_filter_summed.float()
         # diffusion consensus step
         phi_pred_t_t = phi_pred_t_t.reshape(-1, self.signal_dim, 1)
-        x_pred_t_t = self.gcn(phi_pred_t_t[..., 0], edge_index)
+        if self.gcn is None:
+            # no graph convolution: use phi_pred_t_t directly
+            x_pred_t_t = phi_pred_t_t
+        else:
+            x_pred_t_t = self.gcn(phi_pred_t_t[..., 0], edge_index)
         return x_pred_t_t.reshape(x_pred_t_t_1.shape), x_pred_t_t_1, edge_index, hidden_r, pred_sigma
 
     def calculate_features_for_gnn(self, delta_y_innov_i, edge_index, h_mat_i, measurements, node_number,

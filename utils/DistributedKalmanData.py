@@ -86,7 +86,7 @@ class FSystem:
         if isinstance(x, np.ndarray):
             x = torch.tensor(x, dtype=torch.float)
             flag = 1
-        f_jac = torch.vmap(jacfwd(self.f))
+        f_jac = torch.vmap(jacrev(self.f))
         if flag:
             return f_jac(x).numpy()
         return f_jac(x)
@@ -162,8 +162,8 @@ class HSystem:
         if isinstance(x, np.ndarray):
             x = torch.tensor(x, dtype=torch.float)
             flag = 1
-        h1_jac = torch.vmap(jacfwd(self.h1))
-        h2_jac = torch.vmap(jacfwd(self.h2))
+        h1_jac = torch.vmap(jacrev(self.h1))
+        h2_jac = torch.vmap(jacrev(self.h2))
         node_classification = self.node_classification
         for i in range(n_expansions):
             node_classification = node_classification[:, None]
