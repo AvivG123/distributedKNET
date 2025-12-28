@@ -2,7 +2,7 @@ import torch
 import pytorch_lightning as pl
 from torch import Tensor
 from torch.optim import Optimizer
-from torch_geometric.nn import GCNConv, SimpleConv, MessagePassing
+from torch_geometric.nn import GCNConv, SimpleConv, MessagePassing, SAGEConv, GATConv
 from torch_geometric.data import Data, Batch
 
 torch.set_default_dtype(torch.float)
@@ -21,12 +21,25 @@ class StateKnowledge:
         self.q = q
         self.r_array = r_array
         self.x0 = x0
-        self.x_pred_t_1_t_1 = x0
-        self.x_pred_t_1_t_2 = x0
-        self.x_pred_t_2_t_2 = x0
+
+
+class ModelHyperparameters:
+    def __init__(self, hidden_dim, learn_edge_kalman, gcn_layer=None, learning_rate=1e-3):
+        self.hidden_dim = hidden_dim
+        self.learn_edge_kalman = learn_edge_kalman
+        self.gcn_layer = gcn_layer
+        self.learning_rate = learning_rate
+
+
+class DataCharacteristics:
+    def __init__(self, graph_number, node_number, time_steps_number, batch_size):
+        self.graph_number = graph_number
+        self.node_number = node_number
+        self.time_steps_number = time_steps_number
+        self.batch_size = batch_size
+
 
 class EdgeKalmanFilter:
-
     def __init__(self, r_array, signal_dim, measurement_dim=1):
         super(EdgeKalmanFilter, self).__init__()
         self.r_inv = torch.tensor(1 / (r_array ** 2), dtype=torch.float)
@@ -52,7 +65,6 @@ class EdgeKalmanFilter:
 
 
 class CrossKalmanGain(MessagePassing):
-
     def __init__(self, node_noise_dim: int, h_mat_dim: int, delta_y_dim: int,
                  hidden_dim: int, out_dim: int, aggr: str = "mean"):
         super().__init__(aggr=aggr)
@@ -178,6 +190,8 @@ class GraphKalmanFilter(torch.nn.Module):
                 hidden_dim=hidden_dim, out_dim=signal_dim
             )
         self.gcn = SimpleConv(aggr='mean')
+        # self.gcn = None
+        # self.gcn = GCNConv(in_channels=2*signal_dim, out_channels=signal_dim, aggr='mean')
         self.f = f_system
         self.q = 1
 
@@ -210,6 +224,7 @@ class GraphKalmanFilter(torch.nn.Module):
             x_pred_t_t = phi_pred_t_t
         else:
             x_pred_t_t = self.gcn(phi_pred_t_t[..., 0], edge_index)
+            # x_pred_t_t = self.gcn(torch.cat((phi_pred_t_t[..., 0], h_mat_i), dim=-1), edge_index)
         return x_pred_t_t.reshape(x_pred_t_t_1.shape), x_pred_t_t_1, edge_index, hidden_r, pred_sigma
 
     def calculate_features_for_gnn(self, delta_y_innov_i, edge_index, h_mat_i, measurements, node_number,
@@ -289,7 +304,7 @@ class GraphKalmanProcess(pl.LightningModule):
                 batch_size, node_number, self.signal_dim, 1, dtype=torch.float)  # (batch, node_number, 2, 1)
         edge_index = data.edge_index
         delta_y_innov_i = torch.zeros(measurement_shape, dtype=torch.float)[:, :, 0, ...]
-        # todo: check whether the init of the hidden state are neccessary
+        # todo: check whether the init of the hidden state are necessary
         hidden_r = torch.randn((1, data.num_nodes, self.hidden_dim),
                                dtype=torch.float)  # (1, node_number, hidden_dim)
         pred_sigma = torch.randn((data.num_nodes, self.signal_dim * self.signal_dim),
