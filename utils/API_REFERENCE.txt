@@ -1,0 +1,603 @@
+================================================================================
+                    DISTRIBUTED KALMAN NET - API REFERENCE
+                         Black Box Input/Output Guide
+================================================================================
+
+NOTATION:
+  N = number of nodes (e.g., 50)
+  d = state dimension (typically 2)
+  m = measurement dimension (typically 1)
+  T = number of time steps (e.g., 100)
+  B = batch size (e.g., 32)
+  H = hidden dimension (e.g., 32)
+  E = number of edges in graph
+
+================================================================================
+                        DistributedKalmanData.py
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION: seed_everything(seed)
+--------------------------------------------------------------------------------
+Purpose: Set random seeds for reproducibility across all libraries.
+
+INPUT:
+  seed        int         Random seed value (default: 42)
+
+OUTPUT:
+  None                    (modifies global random states)
+
+--------------------------------------------------------------------------------
+FUNCTION: generate_data_points(f, q, x0, time_steps)
+--------------------------------------------------------------------------------
+Purpose: Generate ground truth state trajectories with process noise.
+
+INPUT:
+  f           callable    State transition function (FSystem or FSystemLinear)
+  q           float       Process noise standard deviation
+  x0          ndarray     Initial states, shape: (B, d, 1)
+  time_steps  int         Number of time steps T
+
+OUTPUT:
+  data_points ndarray     Ground truth states, shape: (B, d, 1, T)
+
+--------------------------------------------------------------------------------
+FUNCTION: generate_measurements(h, data_points, r_array, n_expansions=0)
+--------------------------------------------------------------------------------
+Purpose: Generate noisy measurements from ground truth states.
+
+INPUT:
+  h           callable    Measurement function (HSystem or HSystemLinear)
+  data_points ndarray     Ground truth states, shape: (d, T*B) [flattened]
+  r_array     ndarray     Measurement noise std per node, shape: (N,)
+  n_expansions int        Dimension expansion for broadcasting (default: 0)
+
+OUTPUT:
+  measurements ndarray    Noisy measurements, shape: (N, m, T*B)
+
+--------------------------------------------------------------------------------
+CLASS: CreateGraph
+--------------------------------------------------------------------------------
+Purpose: Create a connected small-world sensor network graph.
+
+CONSTRUCTOR:
+  CreateGraph(node_num, k_neighbors=5, rewrite_prob=0.4, seed=42)
+
+INPUT:
+  node_num    int         Number of nodes N
+  k_neighbors int         Base connectivity (default: 5)
+  rewrite_prob float      Watts-Strogatz rewiring probability (default: 0.4)
+  seed        int         Random seed (default: 42)
+
+ATTRIBUTES (after construction):
+  .node_num   int         Number of nodes
+  .graph      nx.Graph    NetworkX graph object
+  .adj_matrix ndarray     Adjacency matrix, shape: (N, N)
+  .edges      EdgeView    Graph edges as list of tuples
+
+--------------------------------------------------------------------------------
+CLASS: FSystem (Nonlinear State Transition)
+--------------------------------------------------------------------------------
+Purpose: Nonlinear state dynamics with sinusoidal component.
+
+CONSTRUCTOR:
+  FSystem(alpha=1, beta=1, sigma=0, delta=0, deg=0)
+
+INPUT:
+  alpha       float       Sine amplitude (default: 1)
+  beta        float       Sine frequency (default: 1)
+  sigma       float       Phase shift as multiple of pi (default: 0)
+  delta       float       Constant offset (default: 0)
+  deg         float       Rotation angle in radians (default: 0)
+
+METHOD: __call__(x)
+  INPUT:  x   ndarray/Tensor   State(s), shape: (d, 1) or (N, d, 1)
+  OUTPUT:     ndarray/Tensor   Next state(s), same shape as input
+
+METHOD: jacobian(x)
+  INPUT:  x   ndarray/Tensor   States, shape: (N, d)
+  OUTPUT:     ndarray/Tensor   Jacobians, shape: (N, d, d)
+
+--------------------------------------------------------------------------------
+CLASS: FSystemLinear (Linear State Transition)
+--------------------------------------------------------------------------------
+Purpose: Linear oscillatory state dynamics (matrix exponential).
+
+CONSTRUCTOR:
+  FSystemLinear(eps=0.015, deg=0)
+
+INPUT:
+  eps         float       Time step / discretization (default: 0.015)
+  deg         float       Model mismatch rotation angle (default: 0)
+
+METHOD: __call__(x)
+  INPUT:  x   ndarray/Tensor   State(s), shape: (d, 1) or (N, d, 1)
+  OUTPUT:     ndarray/Tensor   Next state(s), same shape as input
+
+METHOD: jacobian(x)
+  INPUT:  x   ndarray/Tensor   States, shape: (N, d)
+  OUTPUT:     ndarray/Tensor   Jacobians (constant A), shape: (N, d, d)
+
+--------------------------------------------------------------------------------
+CLASS: HSystem (Nonlinear Measurement Model)
+--------------------------------------------------------------------------------
+Purpose: Heterogeneous nonlinear measurements (two sensor types).
+
+CONSTRUCTOR:
+  HSystem(node_num, alpha=0)
+
+INPUT:
+  node_num    int         Number of sensor nodes N
+  alpha       float       Rotation angle in radians (default: 0)
+
+ATTRIBUTES:
+  .node_classification  Tensor   Binary type per node, shape: (N, 1)
+                                 1 = uses h1, 0 = uses h2
+
+METHOD: __call__(x, n_expansions=0) / func(x, n_expansions=0)
+  INPUT:  
+    x           ndarray/Tensor   State(s)
+                                 n_exp=0: shape (d, 1) -> broadcasts to all nodes
+                                 n_exp=1: shape (N, d, 1) -> per-node
+    n_expansions int             Broadcast dimension expansion
+  OUTPUT:       ndarray/Tensor   Measurements
+                                 n_exp=0: shape (N, m)
+                                 n_exp=1: shape (N, N, m)
+
+METHOD: jacobian(x, n_expansions=0)
+  INPUT:
+    x           ndarray/Tensor   State(s), shape depends on n_expansions
+    n_expansions int             Broadcast dimension expansion
+  OUTPUT:       ndarray/Tensor   Jacobians
+                                 n_exp=0: shape (N, m, d, 1)
+                                 n_exp=1: shape (N, N, m, d, 1)
+  
+  COMMON USAGE:
+    H_T = h_system.jacobian(x_pred, n_expansions=1)[:, 0, ...]
+    Results in H_T with shape: (N, d, m) or (N, N, d, m)
+
+--------------------------------------------------------------------------------
+CLASS: HSystemLinear (Linear Measurement Model)
+--------------------------------------------------------------------------------
+Purpose: Heterogeneous linear measurements with configurable H matrices.
+
+CONSTRUCTOR:
+  HSystemLinear(node_num, p=0.5, h1=None, h2=None)
+
+INPUT:
+  node_num    int         Number of nodes N
+  p           float       Probability of node using h1 (default: 0.5)
+  h1          list        H matrix for type-1, default: [[0., 1.]] -> shape (1, d)
+  h2          list        H matrix for type-2, default: [[1., 0.]] -> shape (1, d)
+
+METHOD: __call__(x, n_expansions=0)
+  INPUT:
+    x           ndarray/Tensor   State(s), shape varies with n_expansions
+    n_expansions int             Broadcast dimension expansion
+  OUTPUT:       ndarray/Tensor   Measurements, shape: (N, m) or (N, N, m)
+
+METHOD: jacobian(x, n_expansions=0)
+  INPUT:
+    x           ndarray/Tensor   States
+    n_expansions int             Broadcast dimension expansion
+  OUTPUT:       ndarray/Tensor   Jacobians (constant H matrices)
+                                 Shape: (N, 1, 1, m, d) repeated for batch
+
+--------------------------------------------------------------------------------
+CLASS: GraphDataset (PyTorch Geometric Dataset)
+--------------------------------------------------------------------------------
+Purpose: Generate complete dataset for training/evaluation.
+
+CONSTRUCTOR:
+  GraphDataset(g, f_system, h_system, q, r_array, 
+               monte_carlo_simulations=1000, time_steps=100, n_expansions=0, x0=10)
+
+INPUT:
+  g                       CreateGraph   Graph structure
+  f_system                FSystem/FSystemLinear   State transition
+  h_system                HSystem/HSystemLinear   Measurement model
+  q                       float         Process noise std
+  r_array                 ndarray       Measurement noise std, shape: (N,)
+  monte_carlo_simulations int           Number of trajectories (default: 1000)
+  time_steps              int           Steps per trajectory (default: 100)
+  n_expansions            int           For measurement generation (default: 0)
+  x0                      float         Initial state mean (default: 10)
+
+METHOD: get(idx)
+  INPUT:  idx   int       Index of data sample
+  OUTPUT: Data            PyTorch Geometric Data object with:
+    .x          Tensor    Measurements, shape: (N, T, m)
+    .y          Tensor    Ground truth states, shape: (T, d, 1)
+    .edge_index Tensor    Graph edges, shape: (2, E)
+    .adj_matrix Tensor    Adjacency matrix, shape: (N, N)
+    .h_system            Reference to measurement model
+
+METHOD: len()
+  OUTPUT: int             Number of samples (monte_carlo_simulations)
+
+
+================================================================================
+                        ClassicDistributedKalman.py
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION: edge_kalman_gain(h_system, r_array, j_matrix, x_pred, measurements)
+--------------------------------------------------------------------------------
+Purpose: Compute weighted innovation for edge-based Kalman update.
+
+INPUT:
+  h_system    HSystem     Measurement model
+  r_array     ndarray     Measurement noise std, shape: (N,)
+  j_matrix    ndarray     Adjacency/weight matrix, shape: (N, N)
+  x_pred      ndarray     Predicted states, shape: (N, d, 1)
+  measurements ndarray    Current measurements, shape: (N, m)
+
+OUTPUT:
+  y_local_delta ndarray   Weighted innovation per node, shape: (N, d, 1)
+
+--------------------------------------------------------------------------------
+FUNCTION: centralized_extended_kalman_filter(...)
+--------------------------------------------------------------------------------
+Purpose: Centralized EKF - all measurements fused at single point (upper bound).
+
+INPUT:
+  measurements ndarray    Sensor measurements, shape: (N, m, T)
+  f_system    FSystem     State transition model
+  h_system    HSystem     Measurement model
+  r_array     ndarray     Measurement noise std, shape: (N,)
+  q           float       Process noise std
+  p0          ndarray     Initial covariance, shape: (d, d)
+  x0          ndarray     Initial state, shape: (d, 1)
+  time_steps  int         Number of time steps T
+  node_num    int         Number of nodes N
+
+OUTPUT:
+  x_hat       ndarray     State estimates, shape: (T, d, 1)
+
+--------------------------------------------------------------------------------
+FUNCTION: diffusion_extended_kalman_filter(...)
+--------------------------------------------------------------------------------
+Purpose: Distributed EKF with diffusion consensus among neighbors.
+
+INPUT:
+  measurements ndarray    Sensor measurements, shape: (N, m, T)
+  f_system    FSystem     State transition model
+  h_system    HSystem     Measurement model
+  r_array     ndarray     Measurement noise std, shape: (N,)
+  q           float       Process noise std
+  p0          ndarray     Initial covariance, shape: (d, d)
+  x0          ndarray     Initial state, shape: (d, 1)
+  j_matrix    ndarray     Diffusion weight matrix, shape: (N, N)
+  time_steps  int         Number of time steps T
+  node_num    int         Number of nodes N
+
+OUTPUT:
+  x_hat       ndarray     Per-node state estimates, shape: (T, N, d, 1)
+
+--------------------------------------------------------------------------------
+FUNCTION: diffusion_extended_kalman_filter_parallel_edge(...)
+--------------------------------------------------------------------------------
+Purpose: Optimized diffusion EKF with parallel edge computation.
+
+INPUT:  (same as diffusion_extended_kalman_filter)
+
+OUTPUT:
+  x_hat       ndarray     Per-node state estimates, shape: (T, N, d, 1)
+
+--------------------------------------------------------------------------------
+FUNCTION: local_extended_kalman_filter(...)
+--------------------------------------------------------------------------------
+Purpose: Local EKF without consensus (lower bound performance).
+
+INPUT:  (same as diffusion_extended_kalman_filter)
+
+OUTPUT:
+  x_hat       ndarray     Per-node local estimates, shape: (T, N, d, 1)
+
+
+================================================================================
+                        DistributedKalmanNet.py
+================================================================================
+
+--------------------------------------------------------------------------------
+FUNCTION: loss_function(x_pred, x_true)
+--------------------------------------------------------------------------------
+Purpose: Compute L2 norm loss between predictions and ground truth.
+
+INPUT:
+  x_pred      Tensor      Predictions, shape: (B, T, N, d, 1)
+  x_true      Tensor      Ground truth, shape: (B, T, d, 1)
+
+OUTPUT:
+  loss        Tensor      Scalar mean L2 loss
+
+--------------------------------------------------------------------------------
+CLASS: StateKnowledge (Configuration Container)
+--------------------------------------------------------------------------------
+Purpose: Store system knowledge for filter initialization.
+
+CONSTRUCTOR:
+  StateKnowledge(f_system, signal_dim, q, r_array, x0)
+
+ATTRIBUTES:
+  .f_system   FSystem     State transition model
+  .signal_dim int         State dimension d
+  .q          float       Process noise std
+  .r_array    ndarray     Measurement noise, shape: (N,)
+  .x0         ndarray     Initial state
+
+--------------------------------------------------------------------------------
+CLASS: ModelHyperparameters (Configuration Container)
+--------------------------------------------------------------------------------
+CONSTRUCTOR:
+  ModelHyperparameters(hidden_dim, learn_edge_kalman, gcn_layer=None, learning_rate=1e-3)
+
+--------------------------------------------------------------------------------
+CLASS: DataCharacteristics (Configuration Container)
+--------------------------------------------------------------------------------
+CONSTRUCTOR:
+  DataCharacteristics(graph_number, node_number, time_steps_number, batch_size)
+
+--------------------------------------------------------------------------------
+CLASS: EdgeKalmanFilter
+--------------------------------------------------------------------------------
+Purpose: Classical edge-based Kalman gain computation (PyTorch version).
+
+CONSTRUCTOR:
+  EdgeKalmanFilter(r_array, signal_dim, measurement_dim=1)
+
+INPUT:
+  r_array         ndarray   Measurement noise std, shape: (N,)
+  signal_dim      int       State dimension d
+  measurement_dim int       Measurement dimension m (default: 1)
+
+METHOD: __call__(x_pred, measurements, h_system, adj_matrix, node_number)
+  INPUT:
+    x_pred      Tensor      Predicted states, shape: (B, N, d, 1)
+    measurements Tensor     Current measurements, shape: (B, N, m)
+    h_system    HSystem     Measurement model
+    adj_matrix  Tensor      Adjacency matrix, shape: (B, N, N) or (N, N)
+    node_number int         Number of nodes N
+  OUTPUT:
+    y_local_delta Tensor    Weighted innovation, shape: (B, N, d, 1)
+    h_transpose_mat Tensor  Jacobians, shape: (B, N, N, d, m)
+
+--------------------------------------------------------------------------------
+CLASS: CrossKalmanGain (MessagePassing GNN)
+--------------------------------------------------------------------------------
+Purpose: Learnable cross-node Kalman gain via message passing.
+
+CONSTRUCTOR:
+  CrossKalmanGain(node_noise_dim, h_mat_dim, delta_y_dim, hidden_dim, out_dim, aggr="mean")
+
+INPUT:
+  node_noise_dim int        Input node feature dimension (H)
+  h_mat_dim      int        Jacobian feature dimension (d * m)
+  delta_y_dim    int        Innovation dimension (m)
+  hidden_dim     int        Hidden layer dimension
+  out_dim        int        Output dimension (d)
+  aggr           str        Aggregation method (default: "mean")
+
+METHOD: forward(x, edge_index, h_mat_edge, delta_y)
+  INPUT:
+    x           Tensor      Node features, shape: (B*N, H)
+    edge_index  Tensor      Graph edges, shape: (2, E)
+    h_mat_edge  Tensor      Edge Jacobians, shape: (E, d*m)
+    delta_y     Tensor      Edge innovations, shape: (E, m)
+  OUTPUT:
+    aggregated  Tensor      Aggregated messages, shape: (B*N, d)
+
+--------------------------------------------------------------------------------
+CLASS: NodeKalmanGnnRnn
+--------------------------------------------------------------------------------
+Purpose: Per-node Kalman processing with GCN and GRU.
+
+CONSTRUCTOR:
+  NodeKalmanGnnRnn(signal_dim, measurement_dim, output_dim, hidden_dim=16)
+
+INPUT:
+  signal_dim      int       State dimension d
+  measurement_dim int       Measurement dimension m
+  output_dim      int       Output dimension (d*d for Kalman gain matrix)
+  hidden_dim      int       Hidden dimension H (default: 16)
+
+METHOD: forward(delta_x_features, delta_y_i, y_innov_features, edge_index, hidden_r, pred_sigma)
+  INPUT:
+    delta_x_features Tensor   State delta features, shape: (B*N, 2d)
+    delta_y_i        Tensor   Measurement delta, shape: (B*N, m)
+    y_innov_features Tensor   Innovation features, shape: (B*N, m + d*m)
+    edge_index       Tensor   Graph edges, shape: (2, E)
+    hidden_r         Tensor   GRU hidden state, shape: (1, B*N, H)
+    pred_sigma       Tensor   Covariance prediction, shape: (B*N, d*d)
+  OUTPUT:
+    node_kalman_output Tensor Kalman gain elements, shape: (B*N, d*d)
+    r_gru_output       Tensor R-GRU output, shape: (B*N, H)
+    hidden_r           Tensor Updated GRU hidden, shape: (1, B*N, H)
+    pred_sigma         Tensor Updated covariance, shape: (B*N, d*d)
+    edge_index         Tensor Graph edges (unchanged)
+
+--------------------------------------------------------------------------------
+FUNCTION: calculate_edge_features(delta_y_t, edge_index, node_number)
+--------------------------------------------------------------------------------
+Purpose: Extract edge features from node tensor.
+
+INPUT:
+  delta_y_t   Tensor      Node features, shape: (B, N, N, m)
+  edge_index  Tensor      Graph edges, shape: (2, E)
+  node_number int         Number of nodes N
+
+OUTPUT:
+  edge_features Tensor    Edge features, shape: (E, m)
+
+--------------------------------------------------------------------------------
+FUNCTION: extract_kalman_features(...)
+--------------------------------------------------------------------------------
+Purpose: Extract all Kalman-related features for GNN processing.
+
+INPUT:
+  edge_index      Tensor    Graph edges, shape: (2, E)
+  measurements    Tensor    Current measurements, shape: (B, N, m)
+  x_pred_t_1_t_1  Tensor    Previous estimate, shape: (B, N, d, 1)
+  x_pred_t_1_t_2  Tensor    Two-step-ago prediction, shape: (B, N, d, 1)
+  x_pred_t_2_t_2  Tensor    Two-step-ago estimate, shape: (B, N, d, 1)
+  y_pred_t_t_1    Tensor    Predicted measurements, shape: (B, N, N, m)
+  node_number     int       Number of nodes N
+
+OUTPUT:
+  delta_x_hat_t_1   Tensor  State correction, shape: (B, N, d, 1)
+  delta_x_wave_t_1  Tensor  State innovation, shape: (B, N, d, 1)
+  delta_y_t         Tensor  Full measurement delta, shape: (B, N, N, m)
+  delta_y_t_i       Tensor  Diagonal measurement delta, shape: (B, N, m)
+  edge_features     Tensor  Edge features, shape: (E, m)
+
+--------------------------------------------------------------------------------
+CLASS: GraphKalmanFilter (torch.nn.Module)
+--------------------------------------------------------------------------------
+Purpose: Main filter module combining prediction, update, and diffusion.
+
+CONSTRUCTOR:
+  GraphKalmanFilter(f_system, signal_dim, node_kalman_dim, edge_features_dim,
+                    r_array, hidden_dim, heads=1, dropout=0.0, learn_edge_kalman=True)
+
+INPUT:
+  f_system            FSystem   State transition model
+  signal_dim          int       State dimension d
+  node_kalman_dim     int       Node network output dimension
+  edge_features_dim   int       Measurement dimension m
+  r_array             ndarray   Measurement noise, shape: (N,)
+  hidden_dim          int       Hidden dimension H
+  heads               int       Attention heads (unused, default: 1)
+  dropout             float     Dropout rate (unused, default: 0.0)
+  learn_edge_kalman   bool      Use learnable cross-node gain (default: True)
+
+METHOD: forward(h_system, measurements, x_pred_t_1_t_1, x_pred_t_1_t_2, 
+                x_pred_t_2_t_2, delta_y_innov_i, edge_index, adj_matrix, 
+                hidden_r, pred_sigma)
+  INPUT:
+    h_system          HSystem   Measurement model
+    measurements      Tensor    Current measurements, shape: (B, N, m)
+    x_pred_t_1_t_1    Tensor    Previous estimate, shape: (B, N, d, 1)
+    x_pred_t_1_t_2    Tensor    Previous prediction, shape: (B, N, d, 1)
+    x_pred_t_2_t_2    Tensor    Two-step-ago estimate, shape: (B, N, d, 1)
+    delta_y_innov_i   Tensor    Measurement innovation, shape: (B, N, m)
+    edge_index        Tensor    Graph edges, shape: (2, E)
+    adj_matrix        Tensor    Adjacency matrix, shape: (N, N)
+    hidden_r          Tensor    GRU hidden state, shape: (1, B*N, H)
+    pred_sigma        Tensor    Covariance prediction, shape: (B*N, d*d)
+  OUTPUT:
+    x_pred_t_t        Tensor    Current estimate, shape: (B, N, d, 1)
+    x_pred_t_t_1      Tensor    Current prediction, shape: (B, N, d, 1)
+    edge_index        Tensor    Graph edges (unchanged)
+    hidden_r          Tensor    Updated GRU hidden
+    pred_sigma        Tensor    Updated covariance
+
+--------------------------------------------------------------------------------
+CLASS: GraphKalmanProcess (pl.LightningModule)
+--------------------------------------------------------------------------------
+Purpose: Top-level trainable model with PyTorch Lightning interface.
+
+CONSTRUCTOR:
+  GraphKalmanProcess(f_system, signal_dim, edge_features_dim, node_kalman_dim,
+                     edge_kalman_dim, r_array, hidden_dim=32, heads=1, dropout=0.0,
+                     lr=1e-3, learn_edge_kalman=True, x0_scale=10)
+
+INPUT:
+  f_system            FSystem   State transition model
+  signal_dim          int       State dimension d (typically 2)
+  edge_features_dim   int       Measurement dimension m (typically 1)
+  node_kalman_dim     int       Node network output dim (typically d*d = 4)
+  edge_kalman_dim     int       Edge network output dim
+  r_array             ndarray   Measurement noise, shape: (N,)
+  hidden_dim          int       Hidden dimension (default: 32)
+  lr                  float     Learning rate (default: 1e-3)
+  learn_edge_kalman   bool      Use learnable cross-node gain (default: True)
+  x0_scale            float     Initial state magnitude (default: 10)
+
+METHOD: forward(data, x_0=None)
+  INPUT:
+    data        Data/Batch  PyTorch Geometric data object with:
+                            .x: measurements, shape: (B*N, T, m)
+                            .edge_index: edges, shape: (2, E)
+                            .adj_matrix: adjacency, shape: (N, N)
+                            .h_system: measurement model
+    x_0         Tensor      Optional initial state, shape: (B, N, d, 1)
+  OUTPUT:
+    x_pred_t    Tensor      State estimates, shape: (B, T, N, d, 1)
+
+METHOD: training_step(batch, batch_idx)
+  INPUT:
+    batch       Batch       PyTorch Geometric batch
+    batch_idx   int         Batch index
+  OUTPUT:
+    loss        Tensor      Training loss (scalar)
+
+METHOD: predict_step(batch, batch_idx, dataloader_idx=0)
+  INPUT:
+    batch       Batch       PyTorch Geometric batch
+    batch_idx   int         Batch index
+  OUTPUT:
+    x_pred_t    Tensor      Predictions, shape: (B, T, N, d, 1)
+
+
+================================================================================
+                           BaselineModels.py
+================================================================================
+
+--------------------------------------------------------------------------------
+CLASS: GnnRnnLightning (pl.LightningModule)
+--------------------------------------------------------------------------------
+Purpose: Pure GNN-RNN baseline without Kalman structure.
+
+CONSTRUCTOR:
+  GnnRnnLightning(input_dim=1, type_num=2, hidden_dim=32, output_dim=2, lr=5e-5)
+
+INPUT:
+  input_dim   int         Measurement dimension m (default: 1)
+  type_num    int         Number of sensor types (default: 2)
+  hidden_dim  int         Hidden dimension H (default: 32)
+  output_dim  int         Output dimension d (default: 2)
+  lr          float       Learning rate (default: 5e-5)
+
+METHOD: forward(measurements, node_types, edge_index, hidden)
+  INPUT:
+    measurements Tensor    Measurements, shape: (B*N, T, m)
+    node_types   Tensor    Sensor type indices, shape: (B*N, 1) [int]
+    edge_index   Tensor    Graph edges, shape: (2, E)
+    hidden       Tensor    GRU hidden state, shape: (1, B*N, 2H) or None
+  OUTPUT:
+    x_pred_t     Tensor    Predictions, shape: (B*N, T, d)
+
+METHOD: training_step(batch, batch_idx)
+  INPUT:
+    batch       Batch       PyTorch Geometric batch
+    batch_idx   int         Batch index
+  OUTPUT:
+    loss        Tensor      Training loss (scalar)
+
+
+================================================================================
+                           QUICK SHAPE REFERENCE
+================================================================================
+
+COMMON VARIABLE SHAPES:
+  State vector:           (d, 1)           typically (2, 1)
+  Per-node states:        (N, d, 1)
+  Batched states:         (B, N, d, 1)
+  Measurements (raw):     (N, m, T)
+  Measurements (model):   (B, N, T, m)
+  Adjacency matrix:       (N, N)
+  Edge index:             (2, E)
+  Jacobian H^T:           (N, d, m)
+  Cross-node Jacobian:    (N, N, d, m)
+  Covariance:             (d, d) or (N, d, d)
+
+TYPICAL VALUES:
+  N (nodes):              50
+  d (state dim):          2
+  m (measurement dim):    1
+  T (time steps):         100
+  B (batch size):         32
+  H (hidden dim):         32
+  E (edges):              ~250 (depends on graph)
+
+================================================================================
