@@ -14,7 +14,8 @@ def edge_kalman_gain(h_system, r_array, j_matrix, x_pred, measurements):
 
 def centralized_extended_kalman_filter(measurements, f_system, h_system, r_array, q, p0, x0,
                                        time_steps, node_num):
-    x_hat = np.zeros((time_steps, 2, 1))
+    state_dim = x0.shape[0]  # Infer state dimension from initial state
+    x_hat = np.zeros((time_steps, state_dim, 1))
     measurements = measurements.transpose(2, 0, 1)
     r_inv = 1 / (r_array ** 2)
     p = p0
@@ -30,7 +31,7 @@ def centralized_extended_kalman_filter(measurements, f_system, h_system, r_array
         M = np.linalg.inv(np.linalg.inv(p) + s_all)
         x_current = x_pred + M @ y_all_delta
         F = f_system.jacobian(x_current[None, ..., 0])[0, ...]
-        p = F @ M @ F.T + node_num * q ** 2 * np.eye(2)
+        p = F @ M @ F.T + node_num * q ** 2 * np.eye(state_dim)
         x_pred = f_system(x_current)
         x_hat[i, ...] = x_current
     return x_hat
@@ -38,7 +39,8 @@ def centralized_extended_kalman_filter(measurements, f_system, h_system, r_array
 
 def diffusion_extended_kalman_filter(measurements, f_system, h_system, r_array, q, p0, x0, j_matrix,
                                      time_steps, node_num):
-    x_hat = np.zeros((time_steps, node_num, 2, 1))
+    state_dim = x0.shape[0]  # Infer state dimension from initial state
+    x_hat = np.zeros((time_steps, node_num, state_dim, 1))
     r_inv = 1 / (r_array ** 2)
     measurements = measurements.transpose(2, 0, 1)
     p = p0[None, ...].repeat(node_num, axis=0)
@@ -67,7 +69,7 @@ def diffusion_extended_kalman_filter(measurements, f_system, h_system, r_array, 
         M_all = np.stack(m_list, axis=0)
         x_current = np.einsum('ij, jmk -> imk', j_matrix, x_current_all) / j_matrix.sum(axis=0)[..., None, None]
         F = f_system.jacobian(x_current[..., 0])
-        p = F @ M_all @ F.transpose((0, 2, 1)) + j_matrix.sum(axis=0)[..., None, None] * q ** 2 * np.eye(2)
+        p = F @ M_all @ F.transpose((0, 2, 1)) + j_matrix.sum(axis=0)[..., None, None] * q ** 2 * np.eye(state_dim)
         x_pred = f_system(x_current)
         x_hat[i, ...] = x_current
     return x_hat
@@ -75,7 +77,8 @@ def diffusion_extended_kalman_filter(measurements, f_system, h_system, r_array, 
 
 def diffusion_extended_kalman_filter_parallel_edge(measurements, f_system, h_system, r_array, q, p0, x0, j_matrix,
                                                    time_steps, node_num):
-    x_hat = np.zeros((time_steps, node_num, 2, 1))
+    state_dim = x0.shape[0]  # Infer state dimension from initial state
+    x_hat = np.zeros((time_steps, node_num, state_dim, 1))
     r_inv = 1 / (r_array ** 2)
     measurements = measurements.transpose(2, 0, 1)
     p = p0[None, ...].repeat(node_num, axis=0)
@@ -103,7 +106,7 @@ def diffusion_extended_kalman_filter_parallel_edge(measurements, f_system, h_sys
         M_all = np.stack(m_list, axis=0)
         x_current = np.einsum('ij, jmk -> imk', j_matrix, x_current_all) / j_matrix.sum(axis=0)[..., None, None]
         F = f_system.jacobian(x_current[..., 0])
-        p = F @ M_all @ F.transpose((0, 2, 1)) + j_matrix.sum(axis=0)[..., None, None] * q ** 2 * np.eye(2)
+        p = F @ M_all @ F.transpose((0, 2, 1)) + j_matrix.sum(axis=0)[..., None, None] * q ** 2 * np.eye(state_dim)
         x_pred = f_system(x_current)
         x_hat[i, ...] = x_current
     return x_hat
@@ -111,7 +114,8 @@ def diffusion_extended_kalman_filter_parallel_edge(measurements, f_system, h_sys
 
 def local_extended_kalman_filter(measurements, f_system, h_system, r_array, q, p0, x0, j_matrix,
                                  time_steps, node_num):
-    x_hat = np.zeros((time_steps, node_num, 2, 1))
+    state_dim = x0.shape[0]  # Infer state dimension from initial state
+    x_hat = np.zeros((time_steps, node_num, state_dim, 1))
     r_inv = 1 / (r_array ** 2)
     measurements = measurements.transpose(2, 0, 1)
     p = p0
@@ -139,7 +143,7 @@ def local_extended_kalman_filter(measurements, f_system, h_system, r_array, q, p
         x_current_all = np.stack(x_current_list, axis=0)
         M_all = np.stack(m_list, axis=0)
         F = f_system.jacobian(x_current_all[..., 0])
-        p = F @ M_all @ F.transpose((0, 2, 1)) + j_matrix.sum(axis=0)[..., None, None] * q ** 2 * np.eye(2)
+        p = F @ M_all @ F.transpose((0, 2, 1)) + j_matrix.sum(axis=0)[..., None, None] * q ** 2 * np.eye(state_dim)
         x_pred = f_system(x_current_all)
         x_hat[i, ...] = x_current_all
     return x_hat
