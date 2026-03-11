@@ -134,7 +134,8 @@ class DistanceAngleObservation:
     def __call__(self, state_vector, n_expansions=0):
         is_tensor = isinstance(state_vector, torch.Tensor)
         sv = state_vector.detach().cpu().numpy() if is_tensor else np.asarray(state_vector)
-        # Batched flattened input: shape (state_dim, N) where N > 1
+
+        # Case 1: Batched flattened input from generate_measurements: shape (state_dim, N)
         if sv.ndim == 2 and sv.shape[1] > 1:
             N = sv.shape[1]
             x_pos = sv[0, :]
@@ -150,11 +151,27 @@ class DistanceAngleObservation:
             if is_tensor:
                 return torch.tensor(result, dtype=torch.float)
             return result  # (num_nodes, 1, N)
-        else:
-            result = self.func(sv, n_expansions)
+
+        # Case 2: Training forward pass: shape (batch, num_nodes, state_dim, 1)
+        # Must return (batch, num_nodes, 1, 1) to match HSystemLinear output
+        if sv.ndim == 4:
+            batch_size = sv.shape[0]
+            num_nodes_in = sv.shape[1]
+            result = np.zeros((batch_size, num_nodes_in, 1, 1))
+            for b in range(batch_size):
+                for n in range(num_nodes_in):
+                    x_pos = sv[b, n, 0, 0]
+                    y_pos = sv[b, n, 2, 0]
+                    result[b, n, 0, 0] = self._obs_single(x_pos, y_pos, n)
             if is_tensor:
                 return torch.tensor(result, dtype=torch.float)
             return result
+
+        # Case 3: Single state or small input
+        result = self.func(sv, n_expansions)
+        if is_tensor:
+            return torch.tensor(result, dtype=torch.float)
+        return result
 
     def jacobian(self, state_vector, n_expansions=0):
         """
@@ -165,15 +182,20 @@ class DistanceAngleObservation:
             Output: (N, 1, N, state_dim, 1)
                     After [:, 0, ...] -> (N, N, state_dim, 1)
                     Then H_T[j, ...] gives (N, state_dim, 1) for node j
+
+        During training (calculate_h_mat):
+            Input: (batch*num_nodes, state_dim, 1) with n_expansions=1
+            Output: (batch*num_nodes, 1, num_nodes, state_dim, 1)
+                    After [:, 0, ...] -> (batch*num_nodes, num_nodes, state_dim, 1)
         """
         is_tensor = isinstance(state_vector, torch.Tensor)
         sv = state_vector.detach().cpu().numpy() if is_tensor else np.asarray(state_vector)
 
         if sv.ndim == 2:
             sv = sv[np.newaxis, ...]
-        batch = sv.shape[0]  # N nodes for n_expansions=1
+        batch = sv.shape[0]
 
-        # Compute Jacobians: (batch, N, state_dim)
+        # Compute Jacobians: (batch, num_nodes, state_dim)
         jacs = np.zeros((batch, self.num_nodes, self.state_dimension))
         for b in range(batch):
             x_pos, y_pos = sv[b, 0, 0], sv[b, 2, 0]
