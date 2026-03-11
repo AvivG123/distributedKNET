@@ -22,6 +22,26 @@ def seed_everything(seed=42):
     torch.backends.cudnn.deterministic = True
 
 
+
+
+def generate_measurements(h, data_points, r_array, n_expansions=0):
+    """
+    Generate measurements using the function h and noise r_array.
+    :param h: the measurement function
+    :param data_points: the data points to be measured by the nodes
+    :param r_array: the noise level for each node
+    :param n_expansions: number of expansions for the measurement function
+    :return:
+    """
+    seed_everything(42)
+    z = h(data_points, n_expansions=n_expansions)
+    noise_shape = z.shape
+    # print(z)
+    v = r_array[:, None, None] * np.random.randn(*noise_shape)
+    measurements = z + v
+    return measurements
+
+
 def generate_data_points(f, q, x0, time_steps):
     """
     Generate data points using the function f and noise q.
@@ -42,23 +62,46 @@ def generate_data_points(f, q, x0, time_steps):
     return data_points  # sdsdsdfsdf
 
 
-def generate_measurements(h, data_points, r_array, n_expansions=0):
+def generate_data_point_const_vel(f_system, initial_state, num_time_steps, process_noise_std):
     """
-    Generate measurements using the function h and noise r_array.
-    :param h: the measurement function
-    :param data_points: the data points to be measured by the nodes
-    :param r_array: the noise level for each node
-    :param n_expansions: number of expansions for the measurement function
-    :return:
+    Generate ground truth state trajectory.
+    x_{k+1} = f(x_k) + w_k
     """
-    seed_everything(42)
-    z = h(data_points, n_expansions=n_expansions)
-    noise_shape = z.shape
-    # print(z)
-    v = r_array[:, None, None] * np.random.randn(*noise_shape)
-    measurements = z + v
-    return measurements
+    state_dim = initial_state.shape[0]
+    trajectory = torch.zeros((num_time_steps, state_dim, 1))
+    state_noise = torch.randn(num_time_steps, state_dim, 1) * process_noise_std
 
+    x_current = torch.tensor(initial_state, dtype=torch.float)
+    for k in range(num_time_steps):
+        x_next = f_system(x_current) + state_noise[k]
+        trajectory[k] = x_next
+        x_current = x_next
+
+    return trajectory
+
+
+def generate_measurements_const_vel(h_system, trajectory, measurement_noise_std):
+    """
+    Generate noisy measurements from trajectory.
+    y_k^{(i)} = h^{(i)}(x_k) + v_k^{(i)}
+
+    ClassicDistributedKalman.py expects: [num_nodes, batch=1, time_steps]
+
+    :return: measurements [num_nodes, batch=1, time_steps]
+    """
+    num_time_steps = trajectory.shape[0]
+    num_nodes = h_system.num_nodes
+
+    # Shape: [num_nodes, batch=1, time_steps] for ClassicDistributedKalman.py
+    measurements = np.zeros((num_nodes, 1, num_time_steps))
+    observation_noise = np.random.randn(num_nodes, num_time_steps) * measurement_noise_std
+
+    for k in range(num_time_steps):
+        x_k = trajectory[k].numpy() if isinstance(trajectory[k], torch.Tensor) else trajectory[k]
+        obs = h_system.func(x_k)  # [num_nodes, 1] - use func() method
+        measurements[:, 0, k] = obs[:, 0] + observation_noise[:, k]
+
+    return measurements
 
 class CreateGraph:
     def __init__(self, node_num, k_neighbors=5, rewrite_prob=0.4, seed=42):
@@ -216,24 +259,32 @@ class HSystemLinear:
 class GraphDataset(Dataset):
     def __init__(
             self, g, f_system, h_system, q, r_array, monte_carlo_simulations=1000,
-            time_steps=100, n_expansions=0, x0=10
+            time_steps=100, n_expansions=0, x0=10,state_dim=2
     ):
         super(GraphDataset, self).__init__()
+        self.state_dim = state_dim
+        if isinstance(g, np.ndarray):
+            self.nx_graph = nx.from_numpy_array(g)
+            self.adj_matrix = g
+        else:
+            self.nx_graph = g.graph
+            self.adj_matrix = np.array(g.adj_matrix)
         self.g = g
         self.r_array = r_array
         self.monte_carlo_simulations = monte_carlo_simulations
         self.time_steps = time_steps
-        self.x0 = (x0 * np.ones((self.monte_carlo_simulations, 2, 1), dtype=np.float32) +
-                   np.random.randn(self.monte_carlo_simulations, 2, 1))
+        self.x0 = (x0 * np.ones((self.monte_carlo_simulations, state_dim, 1), dtype=np.float32) +
+                   np.random.randn(self.monte_carlo_simulations, state_dim, 1))
         self.data_points = generate_data_points(f_system, q, self.x0, self.time_steps)
         self.measurements = self.generate_measurements(h_system, n_expansions)
         self.h_system = h_system
         self.data = self.create_dataset()
 
+
     def generate_measurements(self, h_func, n_expansions):
-        data_to_pass = self.data_points.transpose(1, 2, -1, 0).reshape(2, -1)
+        data_to_pass = self.data_points.transpose(1, 2, -1, 0).reshape(self.state_dim, -1)
         measurements = generate_measurements(h_func, data_to_pass, self.r_array, n_expansions)
-        measurements = measurements.reshape(self.g.graph.number_of_nodes(), 1, self.time_steps, self.monte_carlo_simulations)
+        measurements = measurements.reshape(self.nx_graph.number_of_nodes(), 1, self.time_steps, self.monte_carlo_simulations)
         measurements = measurements.transpose(3, 0, 2, 1)
         return measurements
 
@@ -241,10 +292,10 @@ class GraphDataset(Dataset):
         data_list = []
         for idx in range(self.monte_carlo_simulations):
             data = Data(x=torch.tensor(self.measurements[idx, ...], dtype=torch.float),
-                        edge_index=torch.tensor(np.array(self.g.edges).T, dtype=torch.int64),
+                        edge_index=torch.tensor(np.array(self.nx_graph.edges).T, dtype=torch.int64),
                         y=torch.tensor(self.data_points[idx, ...].transpose(-1, 0, 1), dtype=torch.float),
-                        edge_attr=torch.randn(self.g.graph.number_of_edges(), 1, dtype=torch.float),
-                        adj_matrix=torch.Tensor(self.g.adj_matrix), h_system=self.h_system)
+                        edge_attr=torch.randn(self.nx_graph.number_of_edges(), 1, dtype=torch.float),
+                        adj_matrix=torch.Tensor(self.adj_matrix), h_system=self.h_system)
             data_list.append(data)
         return data_list
 
