@@ -132,8 +132,29 @@ class DistanceAngleObservation:
             return result  # (N, batch, 1)
 
     def __call__(self, state_vector, n_expansions=0):
-        """Same as func() for compatibility."""
-        return self.func(state_vector, n_expansions)
+        is_tensor = isinstance(state_vector, torch.Tensor)
+        sv = state_vector.detach().cpu().numpy() if is_tensor else np.asarray(state_vector)
+        # Batched flattened input: shape (state_dim, N) where N > 1
+        if sv.ndim == 2 and sv.shape[1] > 1:
+            N = sv.shape[1]
+            x_pos = sv[0, :]
+            y_pos = sv[2, :]
+            result = np.zeros((self.num_nodes, 1, N))
+            for i in range(self.num_nodes):
+                dx = x_pos - self.node_positions[i, 0]
+                dy = y_pos - self.node_positions[i, 1]
+                if self.node_classification[i, 0].item() == 1:
+                    result[i, 0, :] = np.sqrt(dx ** 2 + dy ** 2)
+                else:
+                    result[i, 0, :] = np.arctan2(dy, dx)
+            if is_tensor:
+                return torch.tensor(result, dtype=torch.float)
+            return result  # (num_nodes, 1, N)
+        else:
+            result = self.func(sv, n_expansions)
+            if is_tensor:
+                return torch.tensor(result, dtype=torch.float)
+            return result
 
     def jacobian(self, state_vector, n_expansions=0):
         """
@@ -145,7 +166,8 @@ class DistanceAngleObservation:
                     After [:, 0, ...] -> (N, N, state_dim, 1)
                     Then H_T[j, ...] gives (N, state_dim, 1) for node j
         """
-        sv = state_vector.numpy() if hasattr(state_vector, 'numpy') else np.asarray(state_vector)
+        is_tensor = isinstance(state_vector, torch.Tensor)
+        sv = state_vector.detach().cpu().numpy() if is_tensor else np.asarray(state_vector)
 
         if sv.ndim == 2:
             sv = sv[np.newaxis, ...]
@@ -159,11 +181,13 @@ class DistanceAngleObservation:
                 jacs[b, i, :] = self._jac_single(x_pos, y_pos, i)
 
         if n_expansions > 0:
-            # Shape: (batch, 1, N, state_dim, 1) for ClassicDistributedKalman.py
-            return jacs[:, np.newaxis, :, :, np.newaxis]
+            result = jacs[:, np.newaxis, :, :, np.newaxis]
         else:
-            # Shape: (N, batch, state_dim, 1)
-            return jacs.transpose(1, 0, 2)[:, :, :, np.newaxis]
+            result = jacs.transpose(1, 0, 2)[:, :, :, np.newaxis]
+
+        if is_tensor:
+            return torch.tensor(result, dtype=torch.float)
+        return result
 
 
 def create_distance_based_graph(node_positions, k_neighbors=3, seed=None):
