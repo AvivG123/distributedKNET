@@ -10,7 +10,8 @@ torch.set_default_dtype(torch.float)
 
 def loss_function(x_pred, x_true):
     diff_x = x_pred - x_true[..., None, :, :]
-    loss = torch.linalg.norm(diff_x, ord=2, dim=(-1, -2)).mean()
+    # Avoid the SVD-based matrix 2-norm, which is not implemented on MPS.
+    loss = torch.sqrt(torch.sum(diff_x.float() ** 2, dim=(-1, -2))).mean()
     return loss
 
 
@@ -47,12 +48,19 @@ class EdgeKalmanFilter:
         self.measurement_dim = measurement_dim
 
     def __call__(self, x_pred, measurements, h_system, adj_matrix, node_number):
-        r_inv = self.r_inv.repeat(node_number)
-        adj_matrix_reshaped = adj_matrix.reshape(-1, node_number, node_number)
-        measurements = measurements.reshape(-1, node_number, self.measurement_dim, 1)
+        device = x_pred.device
+        dtype = x_pred.dtype
+        r_inv = self.r_inv.to(device=device).repeat(node_number)
+        adj_matrix_reshaped = adj_matrix.to(device=device).reshape(-1, node_number, node_number)
+        measurements = measurements.to(device=device).reshape(-1, node_number, self.measurement_dim, 1)
         h_transpose_mat = self.calculate_h_mat(h_system, node_number, x_pred)
+        predicted_measurements = h_system(x_pred)
+        if not isinstance(predicted_measurements, torch.Tensor):
+            predicted_measurements = torch.as_tensor(predicted_measurements, dtype=dtype, device=device)
+        else:
+            predicted_measurements = predicted_measurements.to(device=device, dtype=dtype)
         y_diff = h_transpose_mat @ r_inv[None, None, :, None, None].float() @ (
-                    measurements[:, None, ...].float() - h_system(x_pred)[..., None])
+                    measurements[:, None, ...].float() - predicted_measurements[..., None])
         y_local_delta_unnorm = (adj_matrix_reshaped[..., None, None] * y_diff).sum(2)
         y_local_delta = y_local_delta_unnorm / adj_matrix_reshaped.sum(1)[..., None, None]
         return y_local_delta, h_transpose_mat
@@ -60,6 +68,10 @@ class EdgeKalmanFilter:
     def calculate_h_mat(self, h_system, node_number, x_pred) -> torch.Tensor:
         x_pred_reshaped = x_pred.reshape(-1, self.signal_dim, 1)
         h_transpose_mat = h_system.jacobian(x_pred_reshaped, 1)[:, 0, ...]
+        if not isinstance(h_transpose_mat, torch.Tensor):
+            h_transpose_mat = torch.as_tensor(h_transpose_mat, dtype=x_pred.dtype, device=x_pred.device)
+        else:
+            h_transpose_mat = h_transpose_mat.to(device=x_pred.device, dtype=x_pred.dtype)
         h_transpose_mat = h_transpose_mat.reshape(-1, node_number, node_number, self.signal_dim, 1)
         return h_transpose_mat
 
@@ -249,9 +261,18 @@ class GraphKalmanFilter(torch.nn.Module):
         return h_mat_i, h_mat_edges
 
     def prediction_step(self, x_pred_t_1_t_1, h_system):
+        device = x_pred_t_1_t_1.device
+        dtype = x_pred_t_1_t_1.dtype
         x_pred_t_t_1 = self.f(x_pred_t_1_t_1)
-        y_pred_t_t_1 = torch.Tensor(h_system(x_pred_t_t_1))
-        x_pred_t_t_1 = torch.Tensor(x_pred_t_t_1)
+        if not isinstance(x_pred_t_t_1, torch.Tensor):
+            x_pred_t_t_1 = torch.as_tensor(x_pred_t_t_1, dtype=dtype, device=device)
+        else:
+            x_pred_t_t_1 = x_pred_t_t_1.to(device=device, dtype=dtype)
+        y_pred_t_t_1 = h_system(x_pred_t_t_1)
+        if not isinstance(y_pred_t_t_1, torch.Tensor):
+            y_pred_t_t_1 = torch.as_tensor(y_pred_t_t_1, dtype=dtype, device=device)
+        else:
+            y_pred_t_t_1 = y_pred_t_t_1.to(device=device, dtype=dtype)
         return x_pred_t_t_1, y_pred_t_t_1
 
 
@@ -286,7 +307,10 @@ class GraphKalmanProcess(pl.LightningModule):
             x_0, data, measurements_shape)
         measurements = data.x.reshape(*measurements_shape)
         time_steps_number = measurements.shape[-2]
-        x_pred_t = torch.zeros(graph_number, time_steps_number, node_number, self.signal_dim, 1)
+        x_pred_t = torch.zeros(
+            graph_number, time_steps_number, node_number, self.signal_dim, 1,
+            dtype=measurements.dtype, device=measurements.device
+        )
         for i in range(measurements.shape[2]):
             if i > 0:
                 delta_y_innov_i = measurements[:, :, i, ...] - measurements[:, :, i - 1, ...]
@@ -299,16 +323,20 @@ class GraphKalmanProcess(pl.LightningModule):
 
     def initiate_graph_kalman_parameters(self, x_0: torch.Tensor, data: Data, measurement_shape: tuple):
         batch_size, node_number = measurement_shape[0], measurement_shape[1]
+        device = data.x.device
+        dtype = data.x.dtype
         if x_0 is None:
             x_0 = self.x0_scale * torch.ones(
-                batch_size, node_number, self.signal_dim, 1, dtype=torch.float)  # (batch, node_number, 2, 1)
-        edge_index = data.edge_index
-        delta_y_innov_i = torch.zeros(measurement_shape, dtype=torch.float)[:, :, 0, ...]
+                batch_size, node_number, self.signal_dim, 1, dtype=dtype, device=device)  # (batch, node_number, 2, 1)
+        else:
+            x_0 = x_0.to(device=device, dtype=dtype)
+        edge_index = data.edge_index.to(device=device)
+        delta_y_innov_i = torch.zeros(measurement_shape, dtype=dtype, device=device)[:, :, 0, ...]
         # todo: check whether the init of the hidden state are necessary
         hidden_r = torch.randn((1, data.num_nodes, self.hidden_dim),
-                               dtype=torch.float)  # (1, node_number, hidden_dim)
+                               dtype=dtype, device=device)  # (1, node_number, hidden_dim)
         pred_sigma = torch.randn((data.num_nodes, self.signal_dim * self.signal_dim),
-                                 dtype=torch.float)  # (node_number, output_dim)
+                                 dtype=dtype, device=device)  # (node_number, output_dim)
         x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2 = x_0, x_0, x_0  # (batch, node_number, 2, 1)
         return x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2, delta_y_innov_i, edge_index, hidden_r, pred_sigma
 
