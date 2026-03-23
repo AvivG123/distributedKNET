@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import pytorch_lightning as pl
 from torch import Tensor
@@ -321,13 +322,33 @@ class GraphKalmanProcess(pl.LightningModule):
             x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2 = x_pred_t_t, x_pred_t_t_1, x_pred_t_1_t_1
         return x_pred_t
 
+    def _build_default_initial_state(self, batch_size, node_number, dtype, device):
+        """Create the default initial state from either a scalar or a full state vector."""
+        if np.isscalar(self.x0_scale):
+            return self.x0_scale * torch.ones(
+                batch_size, node_number, self.signal_dim, 1, dtype=dtype, device=device
+            )
+
+        x0_array = np.asarray(self.x0_scale, dtype=np.float32)
+        if x0_array.shape == (self.signal_dim,):
+            x0_array = x0_array[:, None]
+
+        expected_shape = (self.signal_dim, 1)
+        if x0_array.shape != expected_shape:
+            raise ValueError(
+                f"x0_scale must be a scalar, shape ({self.signal_dim},), or shape {expected_shape}, "
+                f"but got shape {x0_array.shape}."
+            )
+
+        x0_tensor = torch.as_tensor(x0_array, dtype=dtype, device=device)
+        return x0_tensor[None, None, ...].repeat(batch_size, node_number, 1, 1)
+
     def initiate_graph_kalman_parameters(self, x_0: torch.Tensor, data: Data, measurement_shape: tuple):
         batch_size, node_number = measurement_shape[0], measurement_shape[1]
         device = data.x.device
         dtype = data.x.dtype
         if x_0 is None:
-            x_0 = self.x0_scale * torch.ones(
-                batch_size, node_number, self.signal_dim, 1, dtype=dtype, device=device)  # (batch, node_number, 2, 1)
+            x_0 = self._build_default_initial_state(batch_size, node_number, dtype, device)
         else:
             x_0 = x_0.to(device=device, dtype=dtype)
         edge_index = data.edge_index.to(device=device)

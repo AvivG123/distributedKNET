@@ -273,12 +273,44 @@ class GraphDataset(Dataset):
         self.r_array = r_array
         self.monte_carlo_simulations = monte_carlo_simulations
         self.time_steps = time_steps
-        self.x0 = (x0 * np.ones((self.monte_carlo_simulations, state_dim, 1), dtype=np.float32) +
-                   np.random.randn(self.monte_carlo_simulations, state_dim, 1))
+        self.x0 = self._build_initial_state_batch(x0)
         self.data_points = generate_data_points(f_system, q, self.x0, self.time_steps)
         self.measurements = self.generate_measurements(h_system, n_expansions)
         self.h_system = h_system
         self.data = self.create_dataset()
+
+    def _build_initial_state_batch(self, x0):
+        """
+        Build a batch of initial states.
+
+        Supported inputs:
+        - scalar: same center value for every state component
+        - vector of shape (state_dim,) or (state_dim, 1): one initial-state vector
+        - batch of shape (monte_carlo_simulations, state_dim, 1): full batch supplied directly
+        """
+        noise = np.random.randn(self.monte_carlo_simulations, self.state_dim, 1).astype(np.float32)
+
+        if np.isscalar(x0):
+            base_state = np.full((self.state_dim, 1), x0, dtype=np.float32)
+            return base_state[None, ...] + noise
+
+        x0_array = np.asarray(x0, dtype=np.float32)
+
+        if x0_array.shape == (self.state_dim,):
+            x0_array = x0_array[:, None]
+
+        if x0_array.shape == (self.state_dim, 1):
+            return x0_array[None, ...] + noise
+
+        expected_batch_shape = (self.monte_carlo_simulations, self.state_dim, 1)
+        if x0_array.shape == expected_batch_shape:
+            return x0_array
+
+        raise ValueError(
+            f"x0 must be a scalar, shape ({self.state_dim},), "
+            f"shape ({self.state_dim}, 1), or shape {expected_batch_shape}, "
+            f"but got shape {x0_array.shape}."
+        )
 
 
     def generate_measurements(self, h_func, n_expansions):

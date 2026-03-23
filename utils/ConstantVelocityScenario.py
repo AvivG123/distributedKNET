@@ -2,6 +2,11 @@ import numpy as np
 import torch
 import networkx as nx
 import random
+import os
+import json
+import pandas as pd
+import matplotlib.pyplot as plt
+from torch_geometric.data import Data
 
 
 class ConstantVelocityModel:
@@ -293,4 +298,290 @@ def create_distance_based_graph(node_positions, k_neighbors=3, seed=None):
             g.add_edge(min_i, min_j)
 
     return nx.to_numpy_array(g)
+
+
+def seed_everything(seed=42):
+    """Set random seeds for reproducible experiments."""
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+
+
+def get_trainer_accelerator():
+    """Return the preferred Lightning accelerator for the current machine."""
+    if torch.backends.mps.is_available():
+        return "mps"
+    if torch.cuda.is_available():
+        return "gpu"
+    return "cpu"
+
+
+def generate_trajectory(f_system, initial_state, num_time_steps, process_noise_std):
+    """
+    Generate a state trajectory using the supplied dynamics model.
+
+    Returns:
+        torch.Tensor of shape (num_time_steps, state_dim, 1)
+    """
+    state_dim = initial_state.shape[0]
+    trajectory = torch.zeros((num_time_steps, state_dim, 1), dtype=torch.float32)
+    state_noise = torch.randn(num_time_steps, state_dim, 1) * process_noise_std
+
+    x_current = torch.tensor(initial_state, dtype=torch.float32)
+    for k in range(num_time_steps):
+        x_next = f_system(x_current) + state_noise[k]
+        trajectory[k] = x_next
+        x_current = x_next
+    return trajectory
+
+
+def generate_measurements(h_system, trajectory, measurement_noise_std):
+    """
+    Generate noisy node measurements from a trajectory.
+
+    Returns:
+        np.ndarray of shape (num_nodes, 1, num_time_steps)
+    """
+    num_time_steps = trajectory.shape[0]
+    num_nodes = h_system.num_nodes
+
+    measurements = np.zeros((num_nodes, 1, num_time_steps))
+    observation_noise = np.random.randn(num_nodes, num_time_steps) * measurement_noise_std
+
+    for k in range(num_time_steps):
+        x_k = trajectory[k].numpy() if isinstance(trajectory[k], torch.Tensor) else trajectory[k]
+        obs = h_system.func(x_k)
+        measurements[:, 0, k] = obs[:, 0] + observation_noise[:, k]
+
+    return measurements
+
+
+def build_graph_data_for_dkn(adjacency_matrix, h_system, trajectory, measurements):
+    """
+    Convert one simulated scenario into a PyG Data object for GraphKalmanProcess.
+
+    Args:
+        adjacency_matrix: np.ndarray of shape (num_nodes, num_nodes)
+        trajectory: torch.Tensor or np.ndarray of shape (time_steps, state_dim, 1)
+        measurements: np.ndarray of shape (num_nodes, 1, time_steps)
+
+    Returns:
+        torch_geometric.data.Data
+    """
+    graph = nx.from_numpy_array(adjacency_matrix)
+    edge_index = torch.tensor(np.array(graph.edges).T, dtype=torch.int64)
+    measurement_tensor = torch.tensor(measurements.transpose(0, 2, 1), dtype=torch.float32)
+    trajectory_tensor = torch.tensor(trajectory, dtype=torch.float32)
+
+    return Data(
+        x=measurement_tensor,
+        edge_index=edge_index,
+        y=trajectory_tensor,
+        adj_matrix=torch.tensor(adjacency_matrix, dtype=torch.float32),
+        h_system=h_system,
+    )
+
+
+def plot_graph(adjacency_matrix, node_positions, title="Sensor Network Graph"):
+    """Visualize the sensor graph."""
+    plt.figure(figsize=(6, 6))
+    graph = nx.from_numpy_array(adjacency_matrix)
+    pos = {i: node_positions[i] for i in range(len(node_positions))}
+    nx.draw(
+        graph,
+        pos,
+        with_labels=True,
+        node_color="tomato",
+        edge_color="gray",
+        node_size=500,
+        font_size=10,
+    )
+    plt.title(title)
+    plt.show()
+
+
+def plot_trajectory_and_nodes(node_positions, node_types, trajectory, title="Target Trajectory and Sensor Nodes"):
+    """Plot the target trajectory and color sensor nodes by measurement type."""
+    plt.figure(figsize=(10, 10))
+
+    x_vals = trajectory[:, 0, 0].numpy() if isinstance(trajectory, torch.Tensor) else trajectory[:, 0, 0]
+    y_vals = trajectory[:, 2, 0].numpy() if isinstance(trajectory, torch.Tensor) else trajectory[:, 2, 0]
+    plt.plot(x_vals, y_vals, "b-", linewidth=2, marker="o", markersize=2, label="Trajectory", alpha=0.7)
+
+    for i in range(len(node_positions)):
+        x_pos, y_pos = node_positions[i]
+        node_type = node_types[i]
+        color = "#e63946" if node_type == 1 else "#457b9d"
+        label = "Distance nodes" if node_type == 1 else "Angle nodes"
+        plt.plot(x_pos, y_pos, marker="s", markersize=12, color=color, label=label if i < 2 else None)
+        plt.text(x_pos + 1, y_pos + 1, f"{i}", fontsize=10)
+
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.title(title)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.axis("equal")
+    plt.show()
+
+
+def plot_tracking_results(
+    trajectory,
+    x_hat_cekf,
+    x_hat_dekf=None,
+    x_hat_dkn=None,
+    node_positions=None,
+    node_types=None,
+):
+    """Plot trajectory estimates and position errors for CEKF, DEKF, and DKN."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    x_true = trajectory[:, 0, 0].numpy() if isinstance(trajectory, torch.Tensor) else trajectory[:, 0, 0]
+    y_true = trajectory[:, 2, 0].numpy() if isinstance(trajectory, torch.Tensor) else trajectory[:, 2, 0]
+
+    x_cekf = x_hat_cekf[:, 0, 0]
+    y_cekf = x_hat_cekf[:, 2, 0]
+
+    ax1 = axes[0]
+    ax1.plot(x_true, y_true, "b-", linewidth=2, label="True trajectory", alpha=0.7)
+    ax1.plot(x_cekf, y_cekf, "r--", linewidth=2, label="CEKF estimate", alpha=0.7)
+
+    x_dekf = y_dekf = None
+    if x_hat_dekf is not None:
+        x_dekf = x_hat_dekf[:, :, 0, 0].mean(axis=1)
+        y_dekf = x_hat_dekf[:, :, 2, 0].mean(axis=1)
+        ax1.plot(x_dekf, y_dekf, "g:", linewidth=2, label="DEKF estimate (avg)", alpha=0.8)
+
+    x_dkn = y_dkn = None
+    if x_hat_dkn is not None:
+        x_dkn = x_hat_dkn[:, 0]
+        y_dkn = x_hat_dkn[:, 2]
+        ax1.plot(x_dkn, y_dkn, color="#9b5de5", linewidth=2, linestyle="-.", label="DKN estimate", alpha=0.8)
+
+    if node_positions is not None and node_types is not None:
+        for i in range(len(node_positions)):
+            color = "#e63946" if node_types[i] == 1 else "#457b9d"
+            ax1.plot(node_positions[i, 0], node_positions[i, 1], "s", markersize=8, color=color)
+
+    ax1.set_xlabel("x")
+    ax1.set_ylabel("y")
+    ax1.set_title("Trajectory Comparison")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.axis("equal")
+
+    ax2 = axes[1]
+    error_cekf = np.sqrt((x_true - x_cekf) ** 2 + (y_true - y_cekf) ** 2)
+    ax2.plot(error_cekf, "r-", linewidth=1, label=f"CEKF (mean: {error_cekf.mean():.4f})")
+
+    if x_dekf is not None and y_dekf is not None:
+        error_dekf = np.sqrt((x_true - x_dekf) ** 2 + (y_true - y_dekf) ** 2)
+        ax2.plot(error_dekf, "g-", linewidth=1, label=f"DEKF (mean: {error_dekf.mean():.4f})")
+
+    if x_dkn is not None and y_dkn is not None:
+        error_dkn = np.sqrt((x_true - x_dkn) ** 2 + (y_true - y_dkn) ** 2)
+        ax2.plot(error_dkn, color="#9b5de5", linewidth=1, label=f"DKN (mean: {error_dkn.mean():.4f})")
+
+    ax2.set_xlabel("Time step")
+    ax2.set_ylabel("Position error")
+    ax2.set_title("Estimation Error")
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_learning_curve(log_dir, r_value, save_dir):
+    """Plot epoch-level train and validation loss from Lightning CSV logs."""
+    metrics_path = os.path.join(log_dir, "metrics.csv")
+    df = pd.read_csv(metrics_path)
+
+    plt.figure(figsize=(7, 5))
+    if "train_loss:_epoch" in df.columns:
+        train_df = df.dropna(subset=["train_loss:_epoch"])
+        plt.plot(train_df["epoch"], train_df["train_loss:_epoch"], marker="o", label="Train Loss")
+    if "val_loss:_epoch" in df.columns:
+        val_df = df.dropna(subset=["val_loss:_epoch"])
+        plt.plot(val_df["epoch"], val_df["val_loss:_epoch"], marker="o", label="Val Loss")
+
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title(f"Loss per Epoch (r = {r_value})")
+    plt.grid(True)
+    plt.legend()
+
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"learning_curve_r={r_value}.png")
+    plt.savefig(save_path, dpi=200, bbox_inches="tight")
+    plt.show()
+    plt.close()
+
+    print(f"Saved learning curve: {save_path}")
+
+
+def _to_serializable(value):
+    """Recursively convert config values into JSON-serializable objects."""
+    if isinstance(value, dict):
+        return {key: _to_serializable(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_serializable(val) for val in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if hasattr(value, "__fspath__"):
+        return os.fspath(value)
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+    return value
+
+
+def save_config(config_val, save_path):
+    """Save a configuration dictionary as a JSON file."""
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    with open(save_path, "w", encoding="utf-8") as fp:
+        json.dump(_to_serializable(config_val), fp, indent=2, sort_keys=True)
+
+
+def load_config(config_path):
+    """Load a JSON configuration dictionary from disk."""
+    with open(config_path, "r", encoding="utf-8") as fp:
+        return json.load(fp)
+
+
+def plot_generated_trajectories(node_positions, node_types, trajectories, max_trajectories=4, title_prefix="Generated trajectories"):
+    """Plot a few generated trajectories to visualize the training data distribution."""
+    if len(trajectories) == 0:
+        return
+
+    max_trajectories = min(max_trajectories, len(trajectories))
+    fig, axes = plt.subplots(1, max_trajectories, figsize=(5 * max_trajectories, 5), squeeze=False)
+
+    for idx in range(max_trajectories):
+        ax = axes[0, idx]
+        trajectory = trajectories[idx]
+        x_vals = trajectory[:, 0, 0]
+        y_vals = trajectory[:, 2, 0]
+        if isinstance(trajectory, torch.Tensor):
+            x_vals = x_vals.cpu().numpy()
+            y_vals = y_vals.cpu().numpy()
+
+        ax.plot(x_vals, y_vals, "b-", linewidth=2, marker="o", markersize=2, alpha=0.8)
+        for node_idx, (x_pos, y_pos) in enumerate(node_positions):
+            color = "#e63946" if node_types[node_idx] == 1 else "#457b9d"
+            ax.plot(x_pos, y_pos, "s", markersize=8, color=color)
+        ax.set_title(f"{title_prefix} #{idx + 1}")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.grid(True, alpha=0.3)
+        ax.axis("equal")
+
+    plt.tight_layout()
+    plt.show()
 
