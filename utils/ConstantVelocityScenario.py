@@ -173,28 +173,29 @@ class DistanceAngleObservation:
             return result  # (num_nodes, 1, N)
 
         # Case 2: Training forward pass: shape (batch, num_nodes, state_dim, 1)
-        # Must return (batch, num_nodes, 1, 1) to match HSystemLinear output
+        # Return full cross-sensor predictions: (batch, source_node, sensor_node, 1)
         if sv.ndim == 4:
             if is_tensor:
-                x_pos = sv[:, :, 0, 0]
-                y_pos = sv[:, :, 2, 0]
-                pos_x = node_positions[:sv.shape[1], 0].unsqueeze(0)
-                pos_y = node_positions[:sv.shape[1], 1].unsqueeze(0)
-                node_types = node_classification[:sv.shape[1], 0].unsqueeze(0)
+                x_pos = sv[:, :, 0, 0].unsqueeze(-1)
+                y_pos = sv[:, :, 2, 0].unsqueeze(-1)
+                pos_x = node_positions[:, 0].view(1, 1, -1)
+                pos_y = node_positions[:, 1].view(1, 1, -1)
+                node_types = node_classification[:, 0].view(1, 1, -1)
                 dx = x_pos - pos_x
                 dy = y_pos - pos_y
                 distance = torch.sqrt(dx ** 2 + dy ** 2)
                 angle = torch.atan2(dy, dx)
                 result = node_types * distance + (1 - node_types) * angle
-                return result.unsqueeze(-1).unsqueeze(-1)
+                return result.unsqueeze(-1)
             batch_size = sv.shape[0]
             num_nodes_in = sv.shape[1]
-            result = np.zeros((batch_size, num_nodes_in, 1, 1))
+            result = np.zeros((batch_size, num_nodes_in, self.num_nodes, 1))
             for b in range(batch_size):
-                for n in range(num_nodes_in):
-                    x_pos = sv[b, n, 0, 0]
-                    y_pos = sv[b, n, 2, 0]
-                    result[b, n, 0, 0] = self._obs_single(x_pos, y_pos, n)
+                for src in range(num_nodes_in):
+                    x_pos = sv[b, src, 0, 0]
+                    y_pos = sv[b, src, 2, 0]
+                    for sensor in range(self.num_nodes):
+                        result[b, src, sensor, 0] = self._obs_single(x_pos, y_pos, sensor)
             return result
 
         # Case 3: Single state or small input
