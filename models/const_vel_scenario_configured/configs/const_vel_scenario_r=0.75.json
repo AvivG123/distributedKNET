@@ -1,6 +1,6 @@
 {
   "batch_size": 64,
-  "config_path": "/Users/inega/Python/kalmanet2/distributedKNET/models/const_vel_scenario_configured/configs/const_vel_scenario_r=0.5.json",
+  "config_path": "/Users/inega/Python/kalmanet2/distributedKNET/models/const_vel_scenario_configured/configs/const_vel_scenario_r=0.75.json",
   "graph_seed": 42,
   "graph_type": "distance_based_graph",
   "hidden_dim": 64,
@@ -9,14 +9,14 @@
   "learning_rate": 1e-05,
   "log_root": "models/const_vel_scenario_configured",
   "max_epochs": 40,
-  "measurement_noise": 0.5,
+  "measurement_noise": 0.75,
   "measurement_noise_values": [
     0.25,
     0.5,
     0.75,
     1.0
   ],
-  "model_path": "/Users/inega/Python/kalmanet2/distributedKNET/models/const_vel_scenario_configured/DKN/const_vel_scenario_r=0.5.pth",
+  "model_path": "/Users/inega/Python/kalmanet2/distributedKNET/models/const_vel_scenario_configured/DKN/const_vel_scenario_r=0.75.pth",
   "node_positions": [
     [
       37.45401188,
