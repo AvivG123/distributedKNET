@@ -56,6 +56,24 @@ class ConstantVelocityModel:
         return np.tile(F[np.newaxis, ...], (batch_size, 1, 1))
 
 
+def build_bidirectional_edge_index(graph):
+    """
+    Build a directed PyG edge_index from a NetworkX graph.
+    For each undirected edge (u, v), include both (u, v) and (v, u).
+    Self loops (u, u) are kept once.
+    """
+    edge_pairs = np.asarray(list(graph.edges()), dtype=np.int64)
+    if edge_pairs.size == 0:
+        return torch.empty((2, 0), dtype=torch.int64)
+
+    non_self_mask = edge_pairs[:, 0] != edge_pairs[:, 1]
+    reverse_pairs = edge_pairs[non_self_mask][:, [1, 0]]
+    directed_pairs = np.concatenate([edge_pairs, reverse_pairs], axis=0)
+    # Guard against accidental duplicates if input already contains both directions.
+    directed_pairs = np.unique(directed_pairs, axis=0)
+    return torch.tensor(directed_pairs.T, dtype=torch.int64)
+
+
 class DistanceAngleObservation:
     """
     Nonlinear observation function using distance/angle measurements.
@@ -425,7 +443,7 @@ def build_graph_data_for_dkn(adjacency_matrix, h_system, trajectory, measurement
 
     # edge_index and adj_matrix must stay consistent for message passing vs Kalman aggregation.
     graph = nx.from_numpy_array(adjacency_with_self)
-    edge_index = torch.tensor(np.array(graph.edges).T, dtype=torch.int64)
+    edge_index = build_bidirectional_edge_index(graph)
     measurement_tensor = torch.tensor(measurements.transpose(0, 2, 1), dtype=torch.float32)
     trajectory_tensor = torch.tensor(trajectory, dtype=torch.float32)
 

@@ -8,6 +8,24 @@ from torch.autograd.functional import jacobian
 from torch_geometric.data import Data, Dataset
 
 
+def build_bidirectional_edge_index(graph):
+    """
+    Build a directed PyG edge_index from a NetworkX graph.
+    For each undirected edge (u, v), include both (u, v) and (v, u).
+    Self loops (u, u) are kept once.
+    """
+    edge_pairs = np.asarray(list(graph.edges()), dtype=np.int64)
+    if edge_pairs.size == 0:
+        return torch.empty((2, 0), dtype=torch.int64)
+
+    non_self_mask = edge_pairs[:, 0] != edge_pairs[:, 1]
+    reverse_pairs = edge_pairs[non_self_mask][:, [1, 0]]
+    directed_pairs = np.concatenate([edge_pairs, reverse_pairs], axis=0)
+    # Guard against accidental duplicates if input already contains both directions.
+    directed_pairs = np.unique(directed_pairs, axis=0)
+    return torch.tensor(directed_pairs.T, dtype=torch.int64)
+
+
 def seed_everything(seed=42):
     """
     Set the random seed for reproducibility.
@@ -367,11 +385,13 @@ class GraphDataset(Dataset):
 
     def create_dataset(self):
         data_list = []
+        edge_index = build_bidirectional_edge_index(self.nx_graph)
+        edge_count = edge_index.shape[1]
         for idx in range(self.monte_carlo_simulations):
             data = Data(x=torch.tensor(self.measurements[idx, ...], dtype=torch.float),
-                        edge_index=torch.tensor(np.array(self.nx_graph.edges).T, dtype=torch.int64),
+                        edge_index=edge_index,
                         y=torch.tensor(self.data_points[idx, ...].transpose(-1, 0, 1), dtype=torch.float),
-                        edge_attr=torch.randn(self.nx_graph.number_of_edges(), 1, dtype=torch.float),
+                        edge_attr=torch.randn(edge_count, 1, dtype=torch.float),
                         adj_matrix=torch.Tensor(self.adj_matrix), h_system=self.h_system)
             data_list.append(data)
         return data_list

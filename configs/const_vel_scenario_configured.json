@@ -6,7 +6,7 @@
   "learn_edge_kalman": false,
   "learning_rate": 1e-5,
   "log_root": "models/const_vel_scenario_configured",
-  "max_epochs": 60,
+  "max_epochs": 40,
   "measurement_noise_values": [
     0.25,
     0.5,
