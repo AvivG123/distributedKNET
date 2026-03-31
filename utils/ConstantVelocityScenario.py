@@ -7,6 +7,7 @@ import json
 import pandas as pd
 import matplotlib.pyplot as plt
 from torch_geometric.data import Data
+from torch_geometric.utils import to_undirected
 
 
 class ConstantVelocityModel:
@@ -298,6 +299,7 @@ def create_distance_based_graph(node_positions, k_neighbors=3, seed=None):
                             min_i, min_j = u, v
             g.add_edge(min_i, min_j)
 
+    g.add_edges_from([(i, i) for i in range(num_nodes)])
     return nx.to_numpy_array(g)
 
 
@@ -375,7 +377,7 @@ def build_graph_data_for_dkn(adjacency_matrix, h_system, trajectory, measurement
         torch_geometric.data.Data
     """
     graph = nx.from_numpy_array(adjacency_matrix)
-    edge_index = torch.tensor(np.array(graph.edges).T, dtype=torch.int64)
+    edge_index = to_undirected(torch.tensor(np.array(graph.edges).T, dtype=torch.int64))
     measurement_tensor = torch.tensor(measurements.transpose(0, 2, 1), dtype=torch.float32)
     trajectory_tensor = torch.tensor(trajectory, dtype=torch.float32)
 

@@ -6,6 +6,7 @@ import networkx as nx
 from torch.func import jacfwd, jacrev
 from torch.autograd.functional import jacobian
 from torch_geometric.data import Data, Dataset
+from torch_geometric.utils import to_undirected
 
 
 def seed_everything(seed=42):
@@ -324,7 +325,7 @@ class GraphDataset(Dataset):
         data_list = []
         for idx in range(self.monte_carlo_simulations):
             data = Data(x=torch.tensor(self.measurements[idx, ...], dtype=torch.float),
-                        edge_index=torch.tensor(np.array(self.nx_graph.edges).T, dtype=torch.int64),
+                        edge_index=to_undirected(torch.tensor(np.array(self.nx_graph.edges).T, dtype=torch.int64)),
                         y=torch.tensor(self.data_points[idx, ...].transpose(-1, 0, 1), dtype=torch.float),
                         edge_attr=torch.randn(self.nx_graph.number_of_edges(), 1, dtype=torch.float),
                         adj_matrix=torch.Tensor(self.adj_matrix), h_system=self.h_system)
