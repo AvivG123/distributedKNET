@@ -259,7 +259,8 @@ class HSystemLinear:
 class GraphDataset(Dataset):
     def __init__(
             self, g, f_system, h_system, q, r_array, monte_carlo_simulations=1000,
-            time_steps=100, n_expansions=0, x0=10,state_dim=2
+            time_steps=100, n_expansions=0, x0=10, state_dim=2,
+            shared_noise_across_trajectories=False
     ):
         super(GraphDataset, self).__init__()
         self.state_dim = state_dim
@@ -270,11 +271,12 @@ class GraphDataset(Dataset):
             self.nx_graph = g.graph
             self.adj_matrix = np.array(g.adj_matrix)
         self.g = g
-        self.r_array = r_array
+        self.r_array = np.asarray(r_array, dtype=np.float32)
         self.monte_carlo_simulations = monte_carlo_simulations
         self.time_steps = time_steps
+        self.shared_noise_across_trajectories = shared_noise_across_trajectories
         self.x0 = self._build_initial_state_batch(x0)
-        self.data_points = generate_data_points(f_system, q, self.x0, self.time_steps)
+        self.data_points = self._generate_data_points(f_system, q)
         self.measurements = self.generate_measurements(h_system, n_expansions)
         self.h_system = h_system
         self.data = self.create_dataset()
@@ -288,7 +290,11 @@ class GraphDataset(Dataset):
         - vector of shape (state_dim,) or (state_dim, 1): one initial-state vector
         - batch of shape (monte_carlo_simulations, state_dim, 1): full batch supplied directly
         """
-        noise = np.random.randn(self.monte_carlo_simulations, self.state_dim, 1).astype(np.float32)
+        if self.shared_noise_across_trajectories:
+            shared_noise = np.random.randn(1, self.state_dim, 1).astype(np.float32)
+            noise = np.repeat(shared_noise, self.monte_carlo_simulations, axis=0)
+        else:
+            noise = np.random.randn(self.monte_carlo_simulations, self.state_dim, 1).astype(np.float32)
 
         if np.isscalar(x0):
             base_state = np.full((self.state_dim, 1), x0, dtype=np.float32)
@@ -312,12 +318,45 @@ class GraphDataset(Dataset):
             f"but got shape {x0_array.shape}."
         )
 
+    def _generate_data_points(self, f, q):
+        seed_everything(42)
+        noise_shape = self.x0.shape + (self.time_steps,)
+        if self.shared_noise_across_trajectories:
+            shared_process_noise = q * np.random.randn(1, self.state_dim, 1, self.time_steps)
+            process_noise = np.repeat(shared_process_noise, self.monte_carlo_simulations, axis=0)
+        else:
+            process_noise = q * np.random.randn(*noise_shape)
+
+        data_points = np.zeros(shape=noise_shape)
+        x = self.x0
+        for i in range(self.time_steps):
+            x = f(x) + process_noise[..., i]
+            data_points[..., i] = x
+        return data_points
+
 
     def generate_measurements(self, h_func, n_expansions):
         data_to_pass = self.data_points.transpose(1, 2, -1, 0).reshape(self.state_dim, -1)
-        measurements = generate_measurements(h_func, data_to_pass, self.r_array, n_expansions)
+        seed_everything(42)
+        measurements = h_func(data_to_pass, n_expansions=n_expansions)
         measurements = measurements.reshape(self.nx_graph.number_of_nodes(), 1, self.time_steps, self.monte_carlo_simulations)
         measurements = measurements.transpose(3, 0, 2, 1)
+
+        node_count = self.nx_graph.number_of_nodes()
+        if self.r_array.ndim == 0:
+            r_scale = np.full(node_count, float(self.r_array), dtype=np.float32)
+        else:
+            r_scale = self.r_array
+
+        if self.shared_noise_across_trajectories:
+            shared_measurement_noise = np.random.randn(1, node_count, self.time_steps, 1).astype(np.float32)
+            measurement_noise = np.repeat(shared_measurement_noise, self.monte_carlo_simulations, axis=0)
+        else:
+            measurement_noise = np.random.randn(
+                self.monte_carlo_simulations, node_count, self.time_steps, 1
+            ).astype(np.float32)
+
+        measurements = measurements + (r_scale[None, :, None, None] * measurement_noise)
         return measurements
 
     def create_dataset(self):

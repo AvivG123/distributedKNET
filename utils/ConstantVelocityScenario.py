@@ -298,6 +298,8 @@ def create_distance_based_graph(node_positions, k_neighbors=3, seed=None):
                             min_i, min_j = u, v
             g.add_edge(min_i, min_j)
 
+    # Keep self loops for parity with DistributedKalmanData/CreateGraph and DEKF's (A + I) usage.
+    g.add_edges_from((i, i) for i in range(num_nodes))
     return nx.to_numpy_array(g)
 
 
@@ -374,7 +376,12 @@ def build_graph_data_for_dkn(adjacency_matrix, h_system, trajectory, measurement
     Returns:
         torch_geometric.data.Data
     """
-    graph = nx.from_numpy_array(adjacency_matrix)
+    # Idempotent A + I: ensures the diagonal is 1 even if caller forgot to include self loops.
+    adjacency_with_self = np.array(adjacency_matrix, dtype=float, copy=True)
+    np.fill_diagonal(adjacency_with_self, 1.0)
+
+    # edge_index and adj_matrix must stay consistent for message passing vs Kalman aggregation.
+    graph = nx.from_numpy_array(adjacency_with_self)
     edge_index = torch.tensor(np.array(graph.edges).T, dtype=torch.int64)
     measurement_tensor = torch.tensor(measurements.transpose(0, 2, 1), dtype=torch.float32)
     trajectory_tensor = torch.tensor(trajectory, dtype=torch.float32)
@@ -383,7 +390,7 @@ def build_graph_data_for_dkn(adjacency_matrix, h_system, trajectory, measurement
         x=measurement_tensor,
         edge_index=edge_index,
         y=trajectory_tensor,
-        adj_matrix=torch.tensor(adjacency_matrix, dtype=torch.float32),
+        adj_matrix=torch.tensor(adjacency_with_self, dtype=torch.float32),
         h_system=h_system,
     )
 

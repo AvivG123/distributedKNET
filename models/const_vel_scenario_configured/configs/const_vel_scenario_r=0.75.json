@@ -1,6 +1,6 @@
 {
   "batch_size": 64,
-  "config_path": "/Users/inega/Python/kalmanet2/distributedKNET/models/const_vel_scenario_configured/configs/const_vel_scenario_r=0.75.json",
+  "config_path": "/home/kfir-goldring/PycharmProjects/distributedKNET/models/const_vel_scenario_configured/configs/const_vel_scenario_r=0.75.json",
   "graph_seed": 42,
   "graph_type": "distance_based_graph",
   "hidden_dim": 64,
@@ -16,7 +16,7 @@
     0.75,
     1.0
   ],
-  "model_path": "/Users/inega/Python/kalmanet2/distributedKNET/models/const_vel_scenario_configured/DKN/const_vel_scenario_r=0.75.pth",
+  "model_path": "/home/kfir-goldring/PycharmProjects/distributedKNET/models/const_vel_scenario_configured/DKN/const_vel_scenario_r=0.75.pth",
   "node_positions": [
     [
       37.45401188,
@@ -66,6 +66,7 @@
   "process_noise_std": 1.0,
   "save_root": "models/const_vel_scenario_configured",
   "seed": 42,
+  "shared_noise_across_trajectories": false,
   "state_dimension": 4,
   "time_delta": 0.1,
   "time_steps": 20,
