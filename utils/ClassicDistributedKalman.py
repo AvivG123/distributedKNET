@@ -1,12 +1,19 @@
 import numpy as np
 
 
+def maybe_wrap_innovation(h_system, residual, sensor_axis):
+    if hasattr(h_system, "wrap_innovation"):
+        return h_system.wrap_innovation(residual, sensor_axis=sensor_axis)
+    return residual
+
+
 def edge_kalman_gain(h_system, r_array, j_matrix, x_pred, measurements):
     H_T = h_system.jacobian(x_pred, 1)[:, 0, ...]
     r_inv = 1 / (r_array ** 2)
-    y_node = H_T @ r_inv[None, :, None, None] @ measurements[None, ..., None]
-    y_pred = H_T @ r_inv[None, :, None, None] @ h_system(x_pred)[..., None]
-    y_diff = y_node - y_pred
+    measurement_residual = measurements[None, ..., None] - h_system(x_pred)[..., None]
+    # Residual shape is (source_node, sensor_node, measurement_dim, 1) in this path.
+    measurement_residual = maybe_wrap_innovation(h_system, measurement_residual, sensor_axis=1)
+    y_diff = H_T @ r_inv[None, :, None, None] @ measurement_residual
     y_local_delta_unnorm = (j_matrix[..., None, None] * y_diff).sum(1)
     y_local_delta = y_local_delta_unnorm / j_matrix.sum(0)[..., None, None]
     return y_local_delta
@@ -24,10 +31,11 @@ def centralized_extended_kalman_filter(measurements, f_system, h_system, r_array
         H_T = h_system.jacobian(x_pred[None, ...], 1)[0, 0, ...]
         H = H_T.transpose((0, 2, 1))
         node_s = H_T @ r_inv[:, None, None] @ H
-        y_node = H_T @ r_inv[:, None, None] @ measurements[i, ..., None]
-        y_pred = H_T @ r_inv[:, None, None] @ h_system(x_pred[None, ...], 1)
+        measurement_residual = measurements[i, ..., None] - h_system(x_pred[None, ...], 1)
+        measurement_residual = maybe_wrap_innovation(h_system, measurement_residual, sensor_axis=0)
+        y_node_delta = H_T @ r_inv[:, None, None] @ measurement_residual
         s_all = np.sum(node_s, axis=0) / node_num
-        y_all_delta = np.sum(y_node - y_pred, axis=0) / node_num
+        y_all_delta = np.sum(y_node_delta, axis=0) / node_num
         M = np.linalg.inv(np.linalg.inv(p) + s_all)
         x_current = x_pred + M @ y_all_delta
         F = f_system.jacobian(x_current[None, ..., 0])[0, ...]
@@ -57,10 +65,11 @@ def diffusion_extended_kalman_filter(measurements, f_system, h_system, r_array, 
             H_T_j = H_T[j, ...]
             H_j = H[j, ...]
             node_s = H_T_j @ r_inv[:, None, None] @ H_j
-            y_node_j = H_T_j @ r_inv[:, None, None] @ measurements[i, ..., None]
-            y_pred_j = H_T_j @ r_inv[:, None, None] @ h_system.func(x_pred_j)[..., None]
+            measurement_residual_j = measurements[i, ..., None] - h_system.func(x_pred_j, 1)
+            measurement_residual_j = maybe_wrap_innovation(h_system, measurement_residual_j, sensor_axis=0)
+            y_node_delta_j = H_T_j @ r_inv[:, None, None] @ measurement_residual_j
             s_local_j = (j_matrix[:, j, None, None] * node_s).sum(0) / j_matrix[:, j].sum()
-            y_local_delta_j = (j_matrix[:, j, None, None] * (y_node_j - y_pred_j[0,...])).sum(0) / j_matrix[:, j].sum()
+            y_local_delta_j = (j_matrix[:, j, None, None] * y_node_delta_j).sum(0) / j_matrix[:, j].sum()
             M_j = np.linalg.inv(np.linalg.inv(p[j, ...]) + s_local_j)
             x_current_j = (x_pred_j + M_j @ y_local_delta_j)[0, ...]
             x_current_list.append(x_current_j)
@@ -132,10 +141,11 @@ def local_extended_kalman_filter(measurements, f_system, h_system, r_array, q, p
             H_T_j = h_transpose[j, ...]
             H_j = H[j, ...]
             node_s = H_T_j @ r_inv[:, None, None] @ H_j
-            y_node_j = H_T_j @ r_inv[:, None, None] @ measurements[i, ..., None]
-            y_pred_j = H_T_j @ r_inv[:, None, None] @ h_system(x_pred_j)[..., None]
+            measurement_residual_j = measurements[i, ..., None] - h_system(x_pred_j, 1)
+            measurement_residual_j = maybe_wrap_innovation(h_system, measurement_residual_j, sensor_axis=0)
+            y_node_delta_j = H_T_j @ r_inv[:, None, None] @ measurement_residual_j
             s_local_j = (j_matrix[:, j, None, None] * node_s).sum(0) / j_matrix[:, j].sum()
-            y_local_delta_j = (j_matrix[:, j, None, None] * (y_node_j - y_pred_j)).sum(0) / j_matrix[:, j].sum()
+            y_local_delta_j = (j_matrix[:, j, None, None] * y_node_delta_j).sum(0) / j_matrix[:, j].sum()
             M_j = np.linalg.inv(np.linalg.inv(p[j, ...]) + s_local_j)
             x_current_j = (x_pred_j + M_j @ y_local_delta_j)[0, ...]
             x_current_list.append(x_current_j)

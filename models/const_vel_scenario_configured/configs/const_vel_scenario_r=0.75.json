@@ -3,7 +3,7 @@
   "config_path": "/home/kfir-goldring/PycharmProjects/distributedKNET/models/const_vel_scenario_configured/configs/const_vel_scenario_r=0.75.json",
   "graph_seed": 42,
   "graph_type": "distance_based_graph",
-  "hidden_dim": 64,
+  "hidden_dim": 128,
   "k_neighbors": 5,
   "learn_edge_kalman": false,
   "learning_rate": 1e-05,

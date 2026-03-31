@@ -101,6 +101,9 @@ def generate_measurements_const_vel(h_system, trajectory, measurement_noise_std)
         obs = h_system.func(x_k)  # [num_nodes, 1] - use func() method
         measurements[:, 0, k] = obs[:, 0] + observation_noise[:, k]
 
+    if hasattr(h_system, "wrap_measurements"):
+        measurements = h_system.wrap_measurements(measurements, sensor_axis=0)
+
     return measurements
 
 class CreateGraph:
@@ -357,6 +360,9 @@ class GraphDataset(Dataset):
             ).astype(np.float32)
 
         measurements = measurements + (r_scale[None, :, None, None] * measurement_noise)
+        # Keep angular channels cyclic after adding noise; distance channels stay linear.
+        if hasattr(h_func, "wrap_measurements"):
+            measurements = h_func.wrap_measurements(measurements, sensor_axis=1)
         return measurements
 
     def create_dataset(self):

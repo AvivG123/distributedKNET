@@ -80,6 +80,45 @@ class DistanceAngleObservation:
         for i in range(self.num_nodes):
             node_classification[i, 0] = i % 2
         self.node_classification = torch.tensor(node_classification, dtype=torch.float)
+        self.angle_node_mask_np = (node_classification[:, 0] == 0)
+        self.angle_node_mask = torch.tensor(self.angle_node_mask_np, dtype=torch.bool)
+        self.has_wrapped_angles = True
+
+    @staticmethod
+    def _wrap_to_pi(values):
+        if isinstance(values, torch.Tensor):
+            return torch.atan2(torch.sin(values), torch.cos(values))
+        return np.arctan2(np.sin(values), np.cos(values))
+
+    def _angle_mask_for(self, values, sensor_axis):
+        axis = sensor_axis if sensor_axis >= 0 else values.ndim + sensor_axis
+        if axis < 0 or axis >= values.ndim:
+            raise ValueError(f"sensor_axis={sensor_axis} is out of bounds for ndim={values.ndim}")
+        shape = [1] * values.ndim
+        shape[axis] = self.num_nodes
+        if isinstance(values, torch.Tensor):
+            return self.angle_node_mask.to(device=values.device).view(shape)
+        return self.angle_node_mask_np.reshape(shape)
+
+    def wrap_innovation(self, innovation, sensor_axis):
+        """
+        Wrap innovations for angle sensors into [-pi, pi], keep distance residuals linear.
+        """
+        mask = self._angle_mask_for(innovation, sensor_axis)
+        wrapped = self._wrap_to_pi(innovation)
+        if isinstance(innovation, torch.Tensor):
+            return torch.where(mask, wrapped, innovation)
+        return np.where(mask, wrapped, innovation)
+
+    def wrap_measurements(self, measurements, sensor_axis):
+        """
+        Wrap absolute angle measurements into [-pi, pi], keep distance measurements unchanged.
+        """
+        mask = self._angle_mask_for(measurements, sensor_axis)
+        wrapped = self._wrap_to_pi(measurements)
+        if isinstance(measurements, torch.Tensor):
+            return torch.where(mask, wrapped, measurements)
+        return np.where(mask, wrapped, measurements)
 
     def _obs_single(self, x_pos, y_pos, node_idx):
         """Compute observation for single node."""
@@ -360,6 +399,10 @@ def generate_measurements(h_system, trajectory, measurement_noise_std):
         x_k = trajectory[k].numpy() if isinstance(trajectory[k], torch.Tensor) else trajectory[k]
         obs = h_system.func(x_k)
         measurements[:, 0, k] = obs[:, 0] + observation_noise[:, k]
+
+    # Angle channels are circular variables and must stay in [-pi, pi] after adding noise.
+    if hasattr(h_system, "wrap_measurements"):
+        measurements = h_system.wrap_measurements(measurements, sensor_axis=0)
 
     return measurements
 

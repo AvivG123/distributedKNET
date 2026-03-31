@@ -9,6 +9,12 @@ from torch_geometric.data import Data, Batch
 torch.set_default_dtype(torch.float)
 
 
+def maybe_wrap_innovation(h_system, residual, sensor_axis):
+    if hasattr(h_system, "wrap_innovation"):
+        return h_system.wrap_innovation(residual, sensor_axis=sensor_axis)
+    return residual
+
+
 def loss_function(x_pred, x_true):
     diff_x = x_pred - x_true[..., None, :, :]
     # Avoid the SVD-based matrix 2-norm, which is not implemented on MPS.
@@ -60,8 +66,10 @@ class EdgeKalmanFilter:
             predicted_measurements = torch.as_tensor(predicted_measurements, dtype=dtype, device=device)
         else:
             predicted_measurements = predicted_measurements.to(device=device, dtype=dtype)
-        y_diff = h_transpose_mat @ r_inv[None, None, :, None, None].float() @ (
-                    measurements[:, None, ...].float() - predicted_measurements[..., None])
+        measurement_residual = measurements[:, None, ...].float() - predicted_measurements[..., None]
+        # Sensor axis is the third dimension: (batch, source_node, sensor_node, measurement_dim, 1).
+        measurement_residual = maybe_wrap_innovation(h_system, measurement_residual, sensor_axis=2)
+        y_diff = h_transpose_mat @ r_inv[None, None, :, None, None].float() @ measurement_residual
         y_local_delta_unnorm = (adj_matrix_reshaped[..., None, None] * y_diff).sum(2)
         y_local_delta = y_local_delta_unnorm / adj_matrix_reshaped.sum(1)[..., None, None]
         return y_local_delta, h_transpose_mat
@@ -171,8 +179,10 @@ def calculate_edge_features(delta_y_t, edge_index, node_number):
 
 
 def extract_kalman_features(edge_index, measurements, x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2,
-                            y_pred_t_t_1, node_number):
+                            y_pred_t_t_1, node_number, h_system):
     delta_y_t = measurements.unsqueeze(-2) - y_pred_t_t_1.transpose(2, 1)
+    # Sensor axis is dim=1 for (batch, sensor_node, source_node, measurement_dim).
+    delta_y_t = maybe_wrap_innovation(h_system, delta_y_t, sensor_axis=1)
     delta_x_hat_t_1 = x_pred_t_1_t_1 - x_pred_t_1_t_2
     delta_x_wave_t_1 = x_pred_t_1_t_1 - x_pred_t_2_t_2
     delta_y_t = delta_y_t.reshape(-1, node_number, node_number, delta_y_t.shape[-1])
@@ -216,7 +226,7 @@ class GraphKalmanFilter(torch.nn.Module):
                                                             node_number=node_number)
         h_mat_i, h_mat_edges = self.calculate_h_mat_features(h_mat.transpose(1, 2), edge_index, node_number)
         delta_y_t_i, edge_features, x_features, y_innov_features = self.calculate_features_for_gnn(
-            delta_y_innov_i, edge_index, h_mat_i, measurements, node_number, x_pred_t_1_t_1,
+            h_system, delta_y_innov_i, edge_index, h_mat_i, measurements, node_number, x_pred_t_1_t_1,
             x_pred_t_1_t_2, x_pred_t_2_t_2, y_pred_t_t_1)
         node_kalman, r_gru_output, hidden_r, pred_sigma, edge_index = self.node_gnn_rnn(
             x_features, delta_y_t_i, y_innov_features,
@@ -240,11 +250,12 @@ class GraphKalmanFilter(torch.nn.Module):
             # x_pred_t_t = self.gcn(torch.cat((phi_pred_t_t[..., 0], h_mat_i), dim=-1), edge_index)
         return x_pred_t_t.reshape(x_pred_t_t_1.shape), x_pred_t_t_1, edge_index, hidden_r, pred_sigma
 
-    def calculate_features_for_gnn(self, delta_y_innov_i, edge_index, h_mat_i, measurements, node_number,
+    def calculate_features_for_gnn(self, h_system, delta_y_innov_i, edge_index, h_mat_i, measurements, node_number,
                                    x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2, y_pred_t_t_1: Tensor) -> tuple[
         Tensor, Tensor, Tensor, Tensor]:
         delta_x_hat_t_1, delta_x_wave_t_1, _, delta_y_t_i, edge_features = extract_kalman_features(
-            edge_index, measurements, x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2, y_pred_t_t_1, node_number
+            edge_index, measurements, x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2, y_pred_t_t_1, node_number,
+            h_system
         )
         x_features = torch.cat([delta_x_hat_t_1[..., 0], delta_x_wave_t_1[..., 0]], dim=-1)
         x_features = x_features.reshape(-1, 2 * self.signal_dim).float()
@@ -315,6 +326,8 @@ class GraphKalmanProcess(pl.LightningModule):
         for i in range(measurements.shape[2]):
             if i > 0:
                 delta_y_innov_i = measurements[:, :, i, ...] - measurements[:, :, i - 1, ...]
+                # Sensor axis is dim=1 for (batch, sensor_node, measurement_dim).
+                delta_y_innov_i = maybe_wrap_innovation(h_system, delta_y_innov_i, sensor_axis=1)
             x_pred_t_t, x_pred_t_t_1, edge_index, hidden_r, pred_sigma = self.gkf(
                 h_system, measurements[:, :, i, ...], x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2, delta_y_innov_i,
                 edge_index, data.adj_matrix, hidden_r, pred_sigma)
