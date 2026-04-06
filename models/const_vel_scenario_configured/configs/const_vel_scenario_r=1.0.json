@@ -3,12 +3,12 @@
   "config_path": "/Users/inega/Python/kalmanet2/distributedKNET/models/const_vel_scenario_configured/configs/const_vel_scenario_r=1.0.json",
   "graph_seed": 42,
   "graph_type": "distance_based_graph",
-  "hidden_dim": 64,
+  "hidden_dim": 128,
   "k_neighbors": 5,
   "learn_edge_kalman": false,
   "learning_rate": 1e-05,
   "log_root": "models/const_vel_scenario_configured",
-  "max_epochs": 40,
+  "max_epochs": 100,
   "measurement_noise": 1.0,
   "measurement_noise_values": [
     0.25,
@@ -63,7 +63,7 @@
   "num_trials": 50,
   "p0_scale": 10.0,
   "preview_trajectories": 4,
-  "process_noise_std": 1.0,
+  "process_noise_std": 2.0,
   "save_root": "models/const_vel_scenario_configured",
   "seed": 42,
   "state_dimension": 4,
@@ -72,15 +72,15 @@
   "train_sims": 10000,
   "val_sims": 256,
   "x0": [
-    1.0,
-    1.0,
-    1.0,
-    1.0
+    0.0,
+    50.0,
+    0.0,
+    50.0
   ],
   "x0_estimate": [
     0.0,
+    50.0,
     0.0,
-    0.0,
-    0.0
+    50.0
   ]
 }
