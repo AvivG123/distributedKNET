@@ -17,6 +17,3 @@ __pycache__/
 # Virtual environments
 venv/
 .env/
-
-# Trained models (keep local only)
-models/const_vel_scenario_configured/
