@@ -7,7 +7,6 @@ import json
 import pandas as pd
 import matplotlib.pyplot as plt
 from torch_geometric.data import Data
-from torch_geometric.utils import to_undirected
 
 
 class ConstantVelocityModel:
@@ -57,6 +56,24 @@ class ConstantVelocityModel:
         return np.tile(F[np.newaxis, ...], (batch_size, 1, 1))
 
 
+def build_bidirectional_edge_index(graph):
+    """
+    Build a directed PyG edge_index from a NetworkX graph.
+    For each undirected edge (u, v), include both (u, v) and (v, u).
+    Self loops (u, u) are kept once.
+    """
+    edge_pairs = np.asarray(list(graph.edges()), dtype=np.int64)
+    if edge_pairs.size == 0:
+        return torch.empty((2, 0), dtype=torch.int64)
+
+    non_self_mask = edge_pairs[:, 0] != edge_pairs[:, 1]
+    reverse_pairs = edge_pairs[non_self_mask][:, [1, 0]]
+    directed_pairs = np.concatenate([edge_pairs, reverse_pairs], axis=0)
+    # Guard against accidental duplicates if input already contains both directions.
+    directed_pairs = np.unique(directed_pairs, axis=0)
+    return torch.tensor(directed_pairs.T, dtype=torch.int64)
+
+
 class DistanceAngleObservation:
     """
     Nonlinear observation function using distance/angle measurements.
@@ -81,6 +98,45 @@ class DistanceAngleObservation:
         for i in range(self.num_nodes):
             node_classification[i, 0] = i % 2
         self.node_classification = torch.tensor(node_classification, dtype=torch.float)
+        self.angle_node_mask_np = (node_classification[:, 0] == 0)
+        self.angle_node_mask = torch.tensor(self.angle_node_mask_np, dtype=torch.bool)
+        self.has_wrapped_angles = True
+
+    @staticmethod
+    def _wrap_to_pi(values):
+        if isinstance(values, torch.Tensor):
+            return torch.atan2(torch.sin(values), torch.cos(values))
+        return np.arctan2(np.sin(values), np.cos(values))
+
+    def _angle_mask_for(self, values, sensor_axis):
+        axis = sensor_axis if sensor_axis >= 0 else values.ndim + sensor_axis
+        if axis < 0 or axis >= values.ndim:
+            raise ValueError(f"sensor_axis={sensor_axis} is out of bounds for ndim={values.ndim}")
+        shape = [1] * values.ndim
+        shape[axis] = self.num_nodes
+        if isinstance(values, torch.Tensor):
+            return self.angle_node_mask.to(device=values.device).view(shape)
+        return self.angle_node_mask_np.reshape(shape)
+
+    def wrap_innovation(self, innovation, sensor_axis):
+        """
+        Wrap innovations for angle sensors into [-pi, pi], keep distance residuals linear.
+        """
+        mask = self._angle_mask_for(innovation, sensor_axis)
+        wrapped = self._wrap_to_pi(innovation)
+        if isinstance(innovation, torch.Tensor):
+            return torch.where(mask, wrapped, innovation)
+        return np.where(mask, wrapped, innovation)
+
+    def wrap_measurements(self, measurements, sensor_axis):
+        """
+        Wrap absolute angle measurements into [-pi, pi], keep distance measurements unchanged.
+        """
+        mask = self._angle_mask_for(measurements, sensor_axis)
+        wrapped = self._wrap_to_pi(measurements)
+        if isinstance(measurements, torch.Tensor):
+            return torch.where(mask, wrapped, measurements)
+        return np.where(mask, wrapped, measurements)
 
     def _obs_single(self, x_pos, y_pos, node_idx):
         """Compute observation for single node."""
@@ -299,7 +355,8 @@ def create_distance_based_graph(node_positions, k_neighbors=3, seed=None):
                             min_i, min_j = u, v
             g.add_edge(min_i, min_j)
 
-    g.add_edges_from([(i, i) for i in range(num_nodes)])
+    # Keep self loops for parity with DistributedKalmanData/CreateGraph and DEKF's (A + I) usage.
+    g.add_edges_from((i, i) for i in range(num_nodes))
     return nx.to_numpy_array(g)
 
 
@@ -361,6 +418,10 @@ def generate_measurements(h_system, trajectory, measurement_noise_std):
         obs = h_system.func(x_k)
         measurements[:, 0, k] = obs[:, 0] + observation_noise[:, k]
 
+    # Angle channels are circular variables and must stay in [-pi, pi] after adding noise.
+    if hasattr(h_system, "wrap_measurements"):
+        measurements = h_system.wrap_measurements(measurements, sensor_axis=0)
+
     return measurements
 
 
@@ -376,8 +437,13 @@ def build_graph_data_for_dkn(adjacency_matrix, h_system, trajectory, measurement
     Returns:
         torch_geometric.data.Data
     """
-    graph = nx.from_numpy_array(adjacency_matrix)
-    edge_index = to_undirected(torch.tensor(np.array(graph.edges).T, dtype=torch.int64))
+    # Idempotent A + I: ensures the diagonal is 1 even if caller forgot to include self loops.
+    adjacency_with_self = np.array(adjacency_matrix, dtype=float, copy=True)
+    np.fill_diagonal(adjacency_with_self, 1.0)
+
+    # edge_index and adj_matrix must stay consistent for message passing vs Kalman aggregation.
+    graph = nx.from_numpy_array(adjacency_with_self)
+    edge_index = build_bidirectional_edge_index(graph)
     measurement_tensor = torch.tensor(measurements.transpose(0, 2, 1), dtype=torch.float32)
     trajectory_tensor = torch.tensor(trajectory, dtype=torch.float32)
 
@@ -385,7 +451,7 @@ def build_graph_data_for_dkn(adjacency_matrix, h_system, trajectory, measurement
         x=measurement_tensor,
         edge_index=edge_index,
         y=trajectory_tensor,
-        adj_matrix=torch.tensor(adjacency_matrix, dtype=torch.float32),
+        adj_matrix=torch.tensor(adjacency_with_self, dtype=torch.float32),
         h_system=h_system,
     )
 
