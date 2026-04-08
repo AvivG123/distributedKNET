@@ -17,3 +17,6 @@ __pycache__/
 # Virtual environments
 venv/
 .env/
+
+# Local model artifacts (per-user)
+models
