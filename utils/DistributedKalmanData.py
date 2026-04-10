@@ -280,8 +280,7 @@ class HSystemLinear:
 class GraphDataset(Dataset):
     def __init__(
             self, g, f_system, h_system, q, r_array, monte_carlo_simulations=1000,
-            time_steps=100, n_expansions=0, x0=10, state_dim=2,
-            shared_noise_across_trajectories=False
+            time_steps=100, n_expansions=0, x0=10, state_dim=2
     ):
         super(GraphDataset, self).__init__()
         self.state_dim = state_dim
@@ -295,7 +294,6 @@ class GraphDataset(Dataset):
         self.r_array = np.asarray(r_array, dtype=np.float32)
         self.monte_carlo_simulations = monte_carlo_simulations
         self.time_steps = time_steps
-        self.shared_noise_across_trajectories = shared_noise_across_trajectories
         self.x0 = self._build_initial_state_batch(x0)
         self.data_points = self._generate_data_points(f_system, q)
         self.measurements = self.generate_measurements(h_system, n_expansions)
@@ -311,11 +309,7 @@ class GraphDataset(Dataset):
         - vector of shape (state_dim,) or (state_dim, 1): one initial-state vector
         - batch of shape (monte_carlo_simulations, state_dim, 1): full batch supplied directly
         """
-        if self.shared_noise_across_trajectories:
-            shared_noise = np.random.randn(1, self.state_dim, 1).astype(np.float32)
-            noise = np.repeat(shared_noise, self.monte_carlo_simulations, axis=0)
-        else:
-            noise = np.random.randn(self.monte_carlo_simulations, self.state_dim, 1).astype(np.float32)
+        noise = np.random.randn(self.monte_carlo_simulations, self.state_dim, 1).astype(np.float32)
 
         if np.isscalar(x0):
             base_state = np.full((self.state_dim, 1), x0, dtype=np.float32)
@@ -342,11 +336,7 @@ class GraphDataset(Dataset):
     def _generate_data_points(self, f, q):
         seed_everything(42)
         noise_shape = self.x0.shape + (self.time_steps,)
-        if self.shared_noise_across_trajectories:
-            shared_process_noise = q * np.random.randn(1, self.state_dim, 1, self.time_steps)
-            process_noise = np.repeat(shared_process_noise, self.monte_carlo_simulations, axis=0)
-        else:
-            process_noise = q * np.random.randn(*noise_shape)
+        process_noise = q * np.random.randn(*noise_shape)
 
         data_points = np.zeros(shape=noise_shape)
         x = self.x0
@@ -369,13 +359,9 @@ class GraphDataset(Dataset):
         else:
             r_scale = self.r_array
 
-        if self.shared_noise_across_trajectories:
-            shared_measurement_noise = np.random.randn(1, node_count, self.time_steps, 1).astype(np.float32)
-            measurement_noise = np.repeat(shared_measurement_noise, self.monte_carlo_simulations, axis=0)
-        else:
-            measurement_noise = np.random.randn(
-                self.monte_carlo_simulations, node_count, self.time_steps, 1
-            ).astype(np.float32)
+        measurement_noise = np.random.randn(
+            self.monte_carlo_simulations, node_count, self.time_steps, 1
+        ).astype(np.float32)
 
         measurements = measurements + (r_scale[None, :, None, None] * measurement_noise)
         # Keep angular channels cyclic after adding noise; distance channels stay linear.
