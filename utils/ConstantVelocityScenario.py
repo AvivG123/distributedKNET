@@ -506,6 +506,8 @@ def plot_tracking_results(
     x_hat_dkn=None,
     node_positions=None,
     node_types=None,
+    save_path=None,
+    show=True,
 ):
     """Plot trajectory estimates and position errors for CEKF, DEKF, and DKN."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
@@ -563,7 +565,17 @@ def plot_tracking_results(
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.show()
+    if save_path is not None:
+        save_path_str = os.fspath(save_path)
+        save_dir = os.path.dirname(save_path_str)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+        plt.savefig(save_path_str, dpi=200, bbox_inches="tight")
+        print(f"Saved tracking plot: {save_path}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def plot_learning_curve(log_dir, r_value, save_dir):

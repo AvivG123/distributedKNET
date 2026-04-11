@@ -367,9 +367,9 @@ class GraphKalmanProcess(pl.LightningModule):
         edge_index = data.edge_index.to(device=device)
         delta_y_innov_i = torch.zeros(measurement_shape, dtype=dtype, device=device)[:, :, 0, ...]
         # todo: check whether the init of the hidden state are necessary
-        hidden_r = torch.randn((1, data.num_nodes, self.hidden_dim),
+        hidden_r = torch.zeros((1, data.num_nodes, self.hidden_dim),
                                dtype=dtype, device=device)  # (1, node_number, hidden_dim)
-        pred_sigma = torch.randn((data.num_nodes, self.signal_dim * self.signal_dim),
+        pred_sigma = torch.zeros((data.num_nodes, self.signal_dim * self.signal_dim),
                                  dtype=dtype, device=device)  # (node_number, output_dim)
         x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2 = x_0, x_0, x_0  # (batch, node_number, 2, 1)
         return x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2, delta_y_innov_i, edge_index, hidden_r, pred_sigma

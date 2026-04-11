@@ -3,10 +3,11 @@
   "graph_seed": 42,
   "hidden_dim": 128,
   "k_neighbors": 5,
-  "learn_edge_kalman": false,
+  "learn_edge_kalman": true,
   "learning_rate": 1e-5,
   "log_root": "models/kfir/const_vel_scenario_configured",
   "max_epochs": 100,
+  "overwrite": false,
   "measurement_noise_values": [
     0.25,
     0.5,
@@ -64,15 +65,12 @@
   "seed": 42,
   "state_dimension": 4,
   "time_delta": 0.1,
-  "train_time_steps": 20,
-  "test_time_steps": 20,
+  "train_time_steps": 30,
+  "test_time_steps": 30,
   "time_steps": 20,
-  "train_sims": 20000,
+  "train_sims": 10000,
   "val_sims": 256,
   "x0": [
-   0.0,
-    5.0,
-    0.0,
-    50.0
+   1,1,1,1
   ]
 }
