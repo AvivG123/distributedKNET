@@ -2,16 +2,13 @@
 Config-Driven DKN Training
 
 Trains GraphKalmanProcess on the distance/angle constant-velocity scenario
-using a single config_val dictionary loaded from JSON.  Previews generated
-trajectories for each run and saves both model weights and a matching JSON
-config file for later loading.
+using a single config_val dictionary loaded from JSON.  Saves both model
+weights and a matching JSON config file for later loading.
 """
 
-import os
 import sys
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
@@ -34,34 +31,9 @@ from utils.ConstantVelocityScenario import (
     create_distance_based_graph,
     get_trainer_accelerator,
     load_config,
-    plot_generated_trajectories,
-    plot_learning_curve,
     save_config,
     seed_everything,
 )
-
-
-def plot_dkn_prediction_sample(graph, prediction, node_positions, title):
-    """Plot one validation trajectory against the DKN prediction."""
-    x_true = graph.y[:, 0, 0].cpu().numpy()
-    y_true = graph.y[:, 2, 0].cpu().numpy()
-    x_pred = prediction[:, 0]
-    y_pred = prediction[:, 2]
-
-    plt.figure(figsize=(7, 7))
-    plt.plot(x_true, y_true, "b-", linewidth=2, label="True trajectory")
-    plt.plot(x_pred, y_pred, "m--", linewidth=2, label="DKN prediction")
-    plt.scatter(
-        node_positions[:, 0], node_positions[:, 1],
-        c="black", marker="s", s=40, label="Nodes",
-    )
-    plt.title(title)
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.axis("equal")
-    plt.show()
 
 
 def main():
@@ -79,8 +51,8 @@ def main():
     x0 = np.array(config_val["x0"], dtype=float).reshape(state_dimension, 1)
     node_positions = np.array(config_val["node_positions"], dtype=float)
     trainer_accelerator = get_trainer_accelerator()
-    save_root = REPO_ROOT / "models/itay"
-    log_root = REPO_ROOT / "models/itay/logs"
+    save_root = REPO_ROOT / config_val["save_root"]
+    log_root = REPO_ROOT / config_val["log_root"]
 
     print(f"Loaded config from: {config_path}")
     print(pd.Series(config_val))
@@ -95,12 +67,10 @@ def main():
         k_neighbors=config_val["k_neighbors"],
         seed=config_val["graph_seed"],
     )
-    node_types = h_system.node_classification[:, 0].cpu().numpy().astype(int)
 
     model_dir = save_root / "DKN"
-    plot_dir = save_root / "plots"
     config_dir = save_root / "configs"
-    for path in [model_dir, plot_dir, config_dir, log_root]:
+    for path in [model_dir, config_dir, log_root]:
         path.mkdir(parents=True, exist_ok=True)
 
     print("Training node positions:")
@@ -134,18 +104,6 @@ def main():
             n_expansions=1,
             x0=x0,
             state_dim=state_dimension,
-        )
-
-        sample_trajectories = [
-            train_dataset[idx].y.cpu()
-            for idx in range(min(config_val["preview_trajectories"], len(train_dataset)))
-        ]
-        plot_generated_trajectories(
-            node_positions,
-            node_types,
-            sample_trajectories,
-            max_trajectories=config_val["preview_trajectories"],
-            title_prefix=f"Training trajectories (r={r_noise})",
         )
 
         train_loader = DataLoader(
@@ -210,19 +168,6 @@ def main():
         run_config["model_path"] = str(model_path)
         run_config["config_path"] = str(run_config_path)
         save_config(run_config, run_config_path)
-
-        plot_learning_curve(logger.log_dir, r_noise, save_dir=str(plot_dir))
-
-        # ── Quick visual check on one validation sample ──────────────────
-        sample_graph = val_dataset[0]
-        with torch.no_grad():
-            sample_prediction = (
-                kalman_process(sample_graph).squeeze().cpu().numpy().mean(axis=1)
-            )
-        plot_dkn_prediction_sample(
-            sample_graph, sample_prediction, node_positions,
-            title=f"DKN validation example (r={r_noise})",
-        )
 
         print(f"Saved model:  {model_path}")
         print(f"Saved config: {run_config_path}")
