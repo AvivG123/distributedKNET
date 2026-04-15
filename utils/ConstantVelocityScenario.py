@@ -4,6 +4,7 @@ import networkx as nx
 import random
 import os
 import json
+from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 from torch_geometric.data import Data
@@ -636,7 +637,29 @@ def load_config(config_path):
         return json.load(fp)
 
 
-def plot_generated_trajectories(node_positions, node_types, trajectories, max_trajectories=4, title_prefix="Generated trajectories"):
+def next_experiment_dir(save_root):
+    """Return ``save_root / experiment_N`` with the next available integer N."""
+    save_root = Path(save_root)
+    existing = sorted(
+        (d for d in save_root.iterdir() if d.is_dir() and d.name.startswith("experiment_")),
+        key=lambda d: int(d.name.split("_", 1)[1]) if d.name.split("_", 1)[1].isdigit() else -1,
+    )
+    next_id = int(existing[-1].name.split("_", 1)[1]) + 1 if existing else 1
+    return save_root / f"experiment_{next_id}"
+
+
+def list_experiments(save_root):
+    """Return a sorted list of ``experiment_*`` directories under *save_root*."""
+    save_root = Path(save_root)
+    if not save_root.exists():
+        return []
+    return sorted(
+        (d for d in save_root.iterdir() if d.is_dir() and d.name.startswith("experiment_")),
+        key=lambda d: int(d.name.split("_", 1)[1]) if d.name.split("_", 1)[1].isdigit() else 0,
+    )
+
+
+def plot_generated_trajectories(node_positions, node_types, trajectories, max_trajectories=4, title_prefix="Generated trajectories", save_path=None):
     """Plot a few generated trajectories to visualize the training data distribution."""
     if len(trajectories) == 0:
         return
@@ -664,5 +687,10 @@ def plot_generated_trajectories(node_positions, node_types, trajectories, max_tr
         ax.axis("equal")
 
     plt.tight_layout()
+    if save_path is not None:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+        print(f"Saved trajectory preview: {save_path}")
     plt.show()
+    plt.close(fig)
 
