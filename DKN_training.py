@@ -25,6 +25,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 torch.set_default_dtype(torch.float32)
+torch.set_float32_matmul_precision("high")  # TF32 on Ampere+/Blackwell
 
 from utils.DistributedKalmanData import GraphDataset
 from utils.DistributedKalmanNet import GraphKalmanProcess
@@ -79,7 +80,8 @@ def main():
     x0 = np.array(config_val["x0"], dtype=float).reshape(state_dimension, 1)
     node_positions = np.array(config_val["node_positions"], dtype=float)
     trainer_accelerator = get_trainer_accelerator()
-    save_root = REPO_ROOT / config_val["save_root"]
+    use_dt_mismatch = config_val.get("use_dt_mismatch", False)
+    save_root = REPO_ROOT / (config_val["save_root"] if not use_dt_mismatch else "models/kfir/dt_mismatch")
     experiment_dir = next_experiment_dir(save_root)
     description = input("Experiment description: ").strip()
     config_val["description"] = description
@@ -91,7 +93,8 @@ def main():
     print(f"Initial state vector x0:\n{x0}")
 
     # ── Build scenario objects ────────────────────────────────────────────
-    f_system = ConstantVelocityModel(time_delta)
+    # f_system_data always uses the true time_delta for measurement generation
+    f_system_data = ConstantVelocityModel(time_delta)
     h_system = DistanceAngleObservation(node_positions)
     adjacency_matrix = create_distance_based_graph(
         node_positions,
@@ -99,6 +102,8 @@ def main():
         seed=config_val["graph_seed"],
     )
     node_types = h_system.node_classification[:, 0].cpu().numpy().astype(int)
+
+    dt_mismatch_values = config_val.get("dt_mismatch_values", [1.0]) if use_dt_mismatch else [1.0]
 
     model_dir = experiment_dir / "DKN"
     plot_dir = experiment_dir / "plots"
@@ -109,16 +114,17 @@ def main():
 
     print("Training node positions:")
     print(node_positions)
+    if use_dt_mismatch:
+        print(f"dt mismatch enabled — model dt multipliers: {dt_mismatch_values}")
 
-    # ── Train one model per measurement-noise level ───────────────────────
+    # ── Train one model per measurement-noise level (× dt mismatch if enabled) ──
     for r_noise in measurement_noise_values:
-        run_name = f"r={r_noise}"
-        print(f"\nTraining model for measurement noise r = {r_noise}")
         r_array = r_noise * np.ones(num_nodes)
 
+        # Data generation always uses true time_delta
         train_dataset = GraphDataset(
             adjacency_matrix,
-            f_system,
+            f_system_data,
             h_system,
             process_noise_std,
             r_array,
@@ -130,7 +136,7 @@ def main():
         )
         val_dataset = GraphDataset(
             adjacency_matrix,
-            f_system,
+            f_system_data,
             h_system,
             process_noise_std,
             r_array,
@@ -141,7 +147,7 @@ def main():
             state_dim=state_dimension,
         )
 
-        # ── Preview sample trajectories ──────────────────────────────────
+        # ── Preview sample trajectories (once per noise level) ───────────
         n_preview = config_val.get("preview_trajectories", 4)
         sample_trajectories = [
             train_dataset[idx].y.cpu()
@@ -153,7 +159,7 @@ def main():
             sample_trajectories,
             max_trajectories=n_preview,
             title_prefix=f"Training trajectories (r={r_noise})",
-            save_path=plot_dir / f"{run_name}_trajectories.png",
+            save_path=plot_dir / f"r={r_noise}_trajectories.png",
         )
 
         train_loader = DataLoader(
@@ -171,52 +177,61 @@ def main():
             pin_memory=False,
         )
 
-        kalman_process = GraphKalmanProcess(
-            f_system,
-            signal_dim=state_dimension,
-            edge_features_dim=1,
-            node_kalman_dim=state_dimension ** 2,
-            edge_kalman_dim=2,
-            hidden_dim=config_val["hidden_dim"],
-            lr=config_val["learning_rate"],
-            r_array=r_noise,
-            learn_edge_kalman=config_val["learn_edge_kalman"],
-            x0_scale=x0,
-        ).to(torch.float32)
+        for dt_mismatch in dt_mismatch_values:
+            run_name = f"r={r_noise}_dtx{dt_mismatch}" if use_dt_mismatch else f"r={r_noise}"
+            print(f"\nTraining model: r={r_noise}" + (f", dt_mismatch={dt_mismatch}" if use_dt_mismatch else ""))
 
-        early_stopping = pl.callbacks.EarlyStopping(
-            monitor="val_loss:_epoch",
-            patience=5,
-            verbose=True,
-            mode="min",
-            min_delta=0.001,
-        )
-        trainer = pl.Trainer(
-            max_epochs=config_val["max_epochs"],
-            accelerator=trainer_accelerator,
-            devices=1,
-            logger=False,
-            callbacks=[early_stopping],
-            gradient_clip_val=1,
-        )
-        trainer.fit(kalman_process, train_loader, val_loader)
+            # Model uses mismatched dt; with no mismatch this is just time_delta
+            f_system_model = ConstantVelocityModel(time_delta * dt_mismatch)
 
-        # ── Save model ────────────────────────────────────────────────────
-        model_path = model_dir / f"{run_name}.pth"
-        torch.save(kalman_process.state_dict(), model_path)
-        print(f"Saved model: {model_path}")
+            kalman_process = GraphKalmanProcess(
+                f_system_model,
+                signal_dim=state_dimension,
+                edge_features_dim=1,
+                node_kalman_dim=state_dimension ** 2,
+                edge_kalman_dim=2,
+                hidden_dim=config_val["hidden_dim"],
+                lr=config_val["learning_rate"],
+                r_array=r_noise,
+                learn_edge_kalman=config_val["learn_edge_kalman"],
+                x0_scale=x0,
+            ).to(torch.float32)
 
-        # ── Post-training plots ───────────────────────────────────────────
-        sample_graph = val_dataset[0]
-        with torch.no_grad():
-            sample_prediction = kalman_process(sample_graph).squeeze().cpu().numpy().mean(axis=1)
-        plot_dkn_prediction_sample(
-            sample_graph,
-            sample_prediction,
-            node_positions,
-            title=f"DKN validation example (r={r_noise})",
-            save_path=plot_dir / f"{run_name}_prediction.png",
-        )
+            early_stopping = pl.callbacks.EarlyStopping(
+                monitor="val_loss:_epoch",
+                patience=5,
+                verbose=True,
+                mode="min",
+                min_delta=0.001,
+            )
+            trainer = pl.Trainer(
+                max_epochs=config_val["max_epochs"],
+                accelerator=trainer_accelerator,
+                devices=1,
+                **({"precision": "bf16-mixed"} if trainer_accelerator == "gpu" else {}),
+                logger=False,
+                callbacks=[early_stopping],
+                gradient_clip_val=1,
+            )
+            trainer.fit(kalman_process, train_loader, val_loader)
+
+            # ── Save model ────────────────────────────────────────────────
+            model_path = model_dir / f"{run_name}.pth"
+            torch.save(kalman_process.state_dict(), model_path)
+            print(f"Saved model: {model_path}")
+
+            # ── Post-training plots ───────────────────────────────────────
+            sample_graph = val_dataset[0]
+            with torch.no_grad():
+                sample_prediction = kalman_process(sample_graph).squeeze().cpu().numpy().mean(axis=1)
+            title = f"DKN validation example (r={r_noise}" + (f", dt×{dt_mismatch})" if use_dt_mismatch else ")")
+            plot_dkn_prediction_sample(
+                sample_graph,
+                sample_prediction,
+                node_positions,
+                title=title,
+                save_path=plot_dir / f"{run_name}_prediction.png",
+            )
 
 
 if __name__ == "__main__":
