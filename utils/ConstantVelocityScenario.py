@@ -4,6 +4,7 @@ import networkx as nx
 import random
 import os
 import json
+import re
 from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -323,6 +324,12 @@ class DistanceAngleObservation:
         return jacs.transpose(1, 0, 2)[:, :, :, np.newaxis]
 
 
+def generate_node_positions(num_nodes, seed=None, area_size=100.0):
+    """Generate random 2-D node positions from a seed for reproducibility."""
+    rng = np.random.default_rng(seed)
+    return rng.random((num_nodes, 2)) * area_size
+
+
 def create_distance_based_graph(node_positions, k_neighbors=3, seed=None):
     """
     Create a connected graph based on node distances.
@@ -457,7 +464,7 @@ def build_graph_data_for_dkn(adjacency_matrix, h_system, trajectory, measurement
     )
 
 
-def plot_graph(adjacency_matrix, node_positions, title="Sensor Network Graph"):
+def plot_graph(adjacency_matrix, node_positions, title="Sensor Network Graph", save_path=None):
     """Visualize the sensor graph."""
     plt.figure(figsize=(6, 6))
     graph = nx.from_numpy_array(adjacency_matrix)
@@ -472,7 +479,11 @@ def plot_graph(adjacency_matrix, node_positions, title="Sensor Network Graph"):
         font_size=10,
     )
     plt.title(title)
+    if save_path is not None:
+        plt.savefig(save_path, dpi=200, bbox_inches="tight")
+        print(f"Saved graph plot: {save_path}")
     plt.show()
+    plt.close()
 
 
 def plot_trajectory_and_nodes(node_positions, node_types, trajectory, title="Target Trajectory and Sensor Nodes"):
@@ -624,11 +635,75 @@ def _to_serializable(value):
     return value
 
 
+# Match a JSON array whose elements all sit on their own line and contain no
+# nested arrays / objects. Used to collapse arrays of primitives onto a single
+# line for readability (e.g. ``"x0": [0, 50, 0, 50]``). Nested structures like
+# ``node_positions`` (a list of lists) only get their innermost arrays
+# inlined; the outer array stays expanded.
+_PRIMITIVE_ARRAY_RE = re.compile(
+    r"\[\s*\n"                            # opening bracket + newline
+    r"(?:\s*[^][{}\n]+\s*,\s*\n)*"       # element + comma + newline (repeated)
+    r"\s*[^][{}\n]+\s*\n"                # last element + newline
+    r"\s*\]"                              # closing bracket
+)
+
+
+def _split_top_level_commas(text):
+    """Split a comma-separated JSON value list, respecting quoted strings."""
+    parts = []
+    buf = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if escape:
+            buf.append(ch)
+            escape = False
+            continue
+        if in_string and ch == "\\":
+            buf.append(ch)
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            buf.append(ch)
+            continue
+        if ch == "," and not in_string:
+            parts.append("".join(buf).strip())
+            buf = []
+            continue
+        buf.append(ch)
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _compact_scalar_arrays(json_text, max_inline_length=120):
+    """Collapse JSON arrays of primitives onto a single line."""
+
+    def collapse(match):
+        text = match.group(0)
+        parts = _split_top_level_commas(text[1:-1])
+        compact = "[" + ", ".join(parts) + "]"
+        return compact if len(compact) <= max_inline_length else text
+
+    previous = None
+    current = json_text
+    while previous != current:
+        previous = current
+        current = _PRIMITIVE_ARRAY_RE.sub(collapse, current)
+    return current
+
+
 def save_config(config_val, save_path):
-    """Save a configuration dictionary as a JSON file."""
+    """Save a configuration dictionary as a JSON file, preserving key order
+    and inlining short arrays of primitives for readability."""
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    json_text = json.dumps(_to_serializable(config_val), indent=2, sort_keys=False)
+    json_text = _compact_scalar_arrays(json_text)
     with open(save_path, "w", encoding="utf-8") as fp:
-        json.dump(_to_serializable(config_val), fp, indent=2, sort_keys=True)
+        fp.write(json_text)
+        fp.write("\n")
 
 
 def load_config(config_path):
@@ -657,6 +732,175 @@ def list_experiments(save_root):
         (d for d in save_root.iterdir() if d.is_dir() and d.name.startswith("experiment_")),
         key=lambda d: int(d.name.split("_", 1)[1]) if d.name.split("_", 1)[1].isdigit() else 0,
     )
+
+
+# Canonical key order. Mirrors ``configs/const_vel_scenario_configured.json``
+# so that saved configs read top-to-bottom in the same order as the input.
+# Keys not in the input config (``node_positions``, ``description``,
+# ``run_metadata``) are slotted in at logical positions and at the end.
+CANONICAL_CONFIG_ORDER = (
+    "seed",
+    "save_root",
+    "state_dimension",
+    "x0",
+    "time_delta",
+    "process_noise_std",
+    "p0_scale",
+    "measurement_noise_values",
+    "use_dt_mismatch",
+    "dt_mismatch_values",
+    "num_nodes",
+    "graph_seed",
+    "k_neighbors",
+    "node_positions",
+    "hidden_dim",
+    "learn_edge_kalman",
+    "batch_size",
+    "learning_rate",
+    "max_epochs",
+    "train_sims",
+    "val_sims",
+    "train_time_steps",
+    "test_time_steps",
+    "num_trials",
+    "preview_trajectories",
+    "description",
+    "run_metadata",
+)
+
+# Keys that go into the small per-experiment config consumed by the comparison
+# notebook. Anything outside this set lives in ``run_log.json`` only.
+# The order here mirrors ``CANONICAL_CONFIG_ORDER`` so saved files read in the
+# same order as the input config.
+EXPERIMENT_CONFIG_KEYS = (
+    "seed",
+    "state_dimension",
+    "x0",
+    "time_delta",
+    "process_noise_std",
+    "p0_scale",
+    "measurement_noise_values",
+    "use_dt_mismatch",
+    "dt_mismatch_values",
+    "num_nodes",
+    "graph_seed",
+    "k_neighbors",
+    "node_positions",
+    "hidden_dim",
+    "learn_edge_kalman",
+    "learning_rate",
+    "train_time_steps",
+    "test_time_steps",
+    "num_trials",
+    "description",
+)
+
+
+def experiment_index_from_dir(experiment_dir):
+    """Parse the trailing integer ``n`` from an ``experiment_<n>`` directory name."""
+    name = Path(experiment_dir).name
+    if not name.startswith("experiment_"):
+        raise ValueError(f"Not an experiment directory: {experiment_dir}")
+    suffix = name.split("_", 1)[1]
+    if not suffix.isdigit():
+        raise ValueError(f"Cannot parse experiment index from: {name}")
+    return int(suffix)
+
+
+def order_config(data, key_order=CANONICAL_CONFIG_ORDER):
+    """Return a new dict with ``data``'s keys reordered per ``key_order``.
+
+    Keys present in ``data`` but missing from ``key_order`` are appended last
+    in their original insertion order, so unknown / future keys are preserved.
+    """
+    ordered = {key: data[key] for key in key_order if key in data}
+    for key, value in data.items():
+        if key not in ordered:
+            ordered[key] = value
+    return ordered
+
+
+def _build_experiment_config(full_config, node_positions):
+    """Project a full training config down to the comparison-only fields."""
+    subset = {key: full_config[key] for key in EXPERIMENT_CONFIG_KEYS if key in full_config}
+    subset["node_positions"] = _to_serializable(node_positions)
+    return order_config(subset, key_order=EXPERIMENT_CONFIG_KEYS)
+
+
+def _format_log_value(value):
+    """Render a single value for the plain-text run log."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        return json.dumps(_to_serializable(value))
+    if isinstance(value, str):
+        return value
+    return json.dumps(_to_serializable(value))
+
+
+def _format_run_log(full_config, node_positions):
+    """Render the run log as a plain-text document for human inspection."""
+    lines = ["# Configuration"]
+    skip_keys = {"node_positions"}
+    seen = set()
+    for key in CANONICAL_CONFIG_ORDER:
+        if key in skip_keys or key not in full_config:
+            continue
+        lines.append(f"{key}: {_format_log_value(full_config[key])}")
+        seen.add(key)
+    for key, value in full_config.items():
+        if key in skip_keys or key in seen:
+            continue
+        lines.append(f"{key}: {_format_log_value(value)}")
+    lines.append("")
+
+    positions_serialized = _to_serializable(node_positions)
+    lines.append(f"# Node positions ({len(positions_serialized)})")
+    for idx, pos in enumerate(positions_serialized):
+        lines.append(f"  {idx}: {json.dumps(pos)}")
+
+    return "\n".join(lines) + "\n"
+
+
+def save_experiment_config(experiment_dir, full_config, node_positions):
+    """
+    Persist the per-experiment config artifacts.
+
+    Writes into ``experiment_dir``:
+
+    * ``experiment_config_<n>.json`` — small, frozen, comparison-only JSON
+      subset including the resolved ``node_positions``. This is the only file
+      the comparison notebook reads.
+    * ``run.log`` — plain-text snapshot of the full training-time config and
+      ``node_positions``. Intended for human inspection / reproducibility
+      only, never read at inference.
+
+    The JSON file uses ``CANONICAL_CONFIG_ORDER`` so it reads in the same order
+    as the source ``configs/const_vel_scenario_configured.json``.
+    """
+    experiment_dir = Path(experiment_dir)
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    n = experiment_index_from_dir(experiment_dir)
+
+    experiment_config = _build_experiment_config(full_config, node_positions)
+    save_config(experiment_config, experiment_dir / f"experiment_config_{n}.json")
+
+    log_path = experiment_dir / "run.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_text = _format_run_log(full_config, node_positions)
+    log_path.write_text(log_text, encoding="utf-8")
+
+
+def load_experiment_config(experiment_dir):
+    """Load the comparison-only ``experiment_config_<n>.json`` for an experiment."""
+    experiment_dir = Path(experiment_dir)
+    n = experiment_index_from_dir(experiment_dir)
+    config_path = experiment_dir / f"experiment_config_{n}.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"No experiment config found at {config_path}")
+    return load_config(config_path)
 
 
 def plot_generated_trajectories(node_positions, node_types, trajectories, max_trajectories=4, title_prefix="Generated trajectories", save_path=None):

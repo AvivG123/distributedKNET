@@ -33,11 +33,13 @@ from utils.ConstantVelocityScenario import (
     ConstantVelocityModel,
     DistanceAngleObservation,
     create_distance_based_graph,
+    generate_node_positions,
     get_trainer_accelerator,
+    plot_graph,
     load_config,
     next_experiment_dir,
     plot_generated_trajectories,
-    save_config,
+    save_experiment_config,
     seed_everything,
 )
 
@@ -78,7 +80,10 @@ def main():
     process_noise_std = config_val["process_noise_std"]
     measurement_noise_values = config_val["measurement_noise_values"]
     x0 = np.array(config_val["x0"], dtype=float).reshape(state_dimension, 1)
-    node_positions = np.array(config_val["node_positions"], dtype=float)
+    if "node_positions" in config_val and config_val["node_positions"] is not None:
+        node_positions = np.array(config_val["node_positions"], dtype=float)
+    else:
+        node_positions = generate_node_positions(num_nodes, seed=config_val["graph_seed"])
     trainer_accelerator = get_trainer_accelerator()
     use_dt_mismatch = config_val.get("use_dt_mismatch", False)
     save_root = REPO_ROOT / (config_val["save_root"] if not use_dt_mismatch else "models/kfir/dt_mismatch")
@@ -110,7 +115,12 @@ def main():
     for path in [model_dir, plot_dir]:
         path.mkdir(parents=True, exist_ok=True)
 
-    save_config(config_val, experiment_dir / "config.json")
+    save_experiment_config(
+        experiment_dir,
+        full_config=config_val,
+        node_positions=node_positions,
+    )
+    plot_graph(adjacency_matrix, node_positions, save_path=plot_dir / "sensor_graph.png")
 
     print("Training node positions:")
     print(node_positions)
