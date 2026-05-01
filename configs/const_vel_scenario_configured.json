@@ -1,19 +1,18 @@
 {
   "seed": 42,
-  "save_root": "models/itay",
+  "save_root": "models/kfir",
 
   "state_dimension": 4,
   "x0": [0, 50, 0, 50],
   "time_delta": 0.08,
-  "process_noise_std": 2.0,
+  "process_noise_std": 1.5,
   "p0_scale": 10.0,
-  "measurement_noise_values": [0.25, 0.5, 0.75, 1.0, 2.0, 4.0],
-  "use_dt_mismatch": false,
-  "dt_mismatch_values": null,
-
-  "num_nodes": 20,
+  "measurement_noise_values": [1.0],
+  "use_dt_mismatch": true,
+  "dt_mismatch_values": [0.5,0.75,1,1.25,1.5],
+  "num_nodes": 10,
   "graph_seed": 42,
-  "k_neighbors": 10,
+  "k_neighbors": 5,
 
   "hidden_dim": 128,
   "learn_edge_kalman": true,

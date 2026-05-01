@@ -86,7 +86,7 @@ def main():
         node_positions = generate_node_positions(num_nodes, seed=config_val["graph_seed"])
     trainer_accelerator = get_trainer_accelerator()
     use_dt_mismatch = config_val.get("use_dt_mismatch", False)
-    save_root = REPO_ROOT / (config_val["save_root"] if not use_dt_mismatch else "models/kfir/dt_mismatch")
+    save_root = REPO_ROOT / config_val["save_root"]
     experiment_dir = next_experiment_dir(save_root)
     description = input("Experiment description: ").strip()
     config_val["description"] = description
