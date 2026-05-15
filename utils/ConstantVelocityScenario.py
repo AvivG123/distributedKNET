@@ -937,4 +937,3 @@ def plot_generated_trajectories(node_positions, node_types, trajectories, max_tr
         print(f"Saved trajectory preview: {save_path}")
     plt.show()
     plt.close(fig)
-

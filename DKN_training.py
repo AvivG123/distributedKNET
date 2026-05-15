@@ -3,7 +3,7 @@ Config-Driven DKN Training
 
 Trains GraphKalmanProcess on the distance/angle constant-velocity scenario
 using a single config_val dictionary loaded from JSON.  Saves model weights,
-trajectory previews, learning curves, and a matching JSON config file for
+trajectory previews, learning curves, and a matching JSON config file fornum
 later loading.
 """
 
