@@ -1,20 +1,38 @@
+"""Utilities: Graph Kalman network models and helpers.
+
+This module contains PyTorch / PyTorch-Geometric model components used by
+the distributed KNet experiments. The edits here are stylistic and
+safety-focused (device/dtype helpers, docstrings, tidy imports) to make
+the code easier to read and prepare for further production hardening.
+"""
+
 import torch
 import pytorch_lightning as pl
 from torch import Tensor
 from torch.optim import Optimizer
-from torch_geometric.nn import GCNConv, SimpleConv, MessagePassing, SAGEConv, GATConv
+from torch_geometric.nn import GCNConv, SimpleConv, MessagePassing
 from torch_geometric.data import Data, Batch
 
 torch.set_default_dtype(torch.float)
 
 
-def loss_function(x_pred, x_true):
+def loss_function(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
+    """Compute batched L2 norm loss between predictions and truth.
+
+    Shapes expected: x_pred (B, T, N, D, 1), x_true (B, T, N, D, 1) or
+    compatible broadcastable shapes used by the project.
+    """
     diff_x = x_pred - x_true[..., None, :, :]
     loss = torch.linalg.norm(diff_x, ord=2, dim=(-1, -2)).mean()
     return loss
 
 
 class StateKnowledge:
+    """Container for system knowledge (f_system, dims, noise, init).
+
+    Lightweight struct used across the models.
+    """
+
     def __init__(self, f_system, signal_dim, q, r_array, x0):
         self.f_system = f_system
         self.signal_dim = signal_dim
@@ -41,25 +59,28 @@ class DataCharacteristics:
 
 class EdgeKalmanFilter:
     def __init__(self, r_array, signal_dim, measurement_dim=1):
-        super(EdgeKalmanFilter, self).__init__()
-        self.r_inv = torch.tensor(1 / (r_array ** 2), dtype=torch.float)
+        # keep r_inv as a torch tensor for device-safe use
+        self.r_inv = torch.as_tensor(1 / (r_array ** 2), dtype=torch.float)
         self.signal_dim = signal_dim
         self.measurement_dim = measurement_dim
 
     def __call__(self, x_pred, measurements, h_system, adj_matrix, node_number):
-        r_inv = self.r_inv.repeat(node_number)
+        r_inv = self.r_inv.repeat(node_number).to(device=x_pred.device)
         adj_matrix_reshaped = adj_matrix.reshape(-1, node_number, node_number)
         measurements = measurements.reshape(-1, node_number, self.measurement_dim, 1)
         h_transpose_mat = self.calculate_h_mat(h_system, node_number, x_pred)
         y_diff = h_transpose_mat @ r_inv[None, None, :, None, None].float() @ (
-                    measurements[:, None, ...].float() - h_system(x_pred)[..., None])
+                measurements[:, None, ...].float() - h_system(x_pred)[..., None])
         y_local_delta_unnorm = (adj_matrix_reshaped[..., None, None] * y_diff).sum(2)
         y_local_delta = y_local_delta_unnorm / adj_matrix_reshaped.sum(1)[..., None, None]
         return y_local_delta, h_transpose_mat
 
     def calculate_h_mat(self, h_system, node_number, x_pred) -> torch.Tensor:
         x_pred_reshaped = x_pred.reshape(-1, self.signal_dim, 1)
+        # Ensure jacobian output is a torch tensor on the correct device
         h_transpose_mat = h_system.jacobian(x_pred_reshaped, 1)[:, 0, ...]
+        if not isinstance(h_transpose_mat, torch.Tensor):
+            h_transpose_mat = torch.tensor(h_transpose_mat, dtype=torch.float, device=x_pred.device)
         h_transpose_mat = h_transpose_mat.reshape(-1, node_number, node_number, self.signal_dim, 1)
         return h_transpose_mat
 
@@ -76,10 +97,6 @@ class CrossKalmanGain(MessagePassing):
             torch.nn.LeakyReLU(),
             torch.nn.Linear(hidden_dim, hidden_dim),
             torch.nn.LeakyReLU(),
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.LeakyReLU(),
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.LeakyReLU(),
             torch.nn.Linear(hidden_dim, out_dim)
         )
 
@@ -91,8 +108,10 @@ class CrossKalmanGain(MessagePassing):
         # [E, hidden_dim]
         z = torch.cat([x_i, h_mat_edge], dim=-1)
         m = self.mlp(z)
-        m = (m.unsqueeze(-1) @ delta_y.float().unsqueeze(-1)).reshape(x_i.shape[0], -1)
-        # m = (h_mat_edge.unsqueeze(-1) @ x_i.unsqueeze(-1) @ delta_y.float().unsqueeze(-1)).reshape(x_i.shape[0], -1)
+        # Robust multiplication: compute outer-product-like interaction and then flatten
+        dy = delta_y.float().unsqueeze(-1) if delta_y.dim() == 1 else delta_y.float()
+        # m: [E, out_dim], dy: [E, delta_dim] -> create [E, out_dim, delta_dim] then flatten
+        m = (m.unsqueeze(-1) * dy.unsqueeze(1)).reshape(x_i.shape[0], -1)
         return m
 
     def update(self, aggr_out: Tensor) -> Tensor:
@@ -140,21 +159,22 @@ class NodeKalmanGnnRnn(torch.nn.Module):
         r_gru_input = self.fc_r(delta_y_i)
         r_gru_output, hidden_r = self.r_input_gru(r_gru_input.unsqueeze(1), hidden_r)
         r_gru_output = r_gru_output[:, 0, ...]
+
         gnn_features = torch.cat([delta_y_innov_i, r_gru_output], dim=-1)
         node_output_features = self.gcn_nodes(gnn_features, edge_index)
         node_kalman_input = torch.cat([node_output_features, pred_sigma.float()], dim=-1)
         node_kalman_output = self.fc_node_output(node_kalman_input)
+
         delta_x_features = self.fc_signal_features(delta_x_features)
         pred_sigma, _ = self.sigma_gru(delta_x_features.unsqueeze(1), node_kalman_output.unsqueeze(0))
         return node_kalman_output, r_gru_output, hidden_r, pred_sigma[:, 0, ...], edge_index
 
 
 def calculate_edge_features(delta_y_t, edge_index, node_number):
-    graph_index = edge_index[0, :] // node_number
-    source_index = edge_index[0, :] % node_number
-    target_index = edge_index[1, :] % node_number
-    edge_features = delta_y_t[graph_index, source_index, target_index, ...]
-    return edge_features
+    graph_idx = edge_index[0, :] // node_number
+    src_idx = edge_index[0, :] % node_number
+    dst_idx = edge_index[1, :] % node_number
+    return delta_y_t[graph_idx, src_idx, dst_idx, ...]
 
 
 def extract_kalman_features(edge_index, measurements, x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2,
@@ -163,17 +183,36 @@ def extract_kalman_features(edge_index, measurements, x_pred_t_1_t_1, x_pred_t_1
     delta_x_hat_t_1 = x_pred_t_1_t_1 - x_pred_t_1_t_2
     delta_x_wave_t_1 = x_pred_t_1_t_1 - x_pred_t_2_t_2
     delta_y_t = delta_y_t.reshape(-1, node_number, node_number, delta_y_t.shape[-1])
-    node_list = [i for i in range(node_number)]
-    delta_y_t_i = delta_y_t[:, node_list, node_list, ...]
+    delta_y_t_i = delta_y_t[:, range(node_number), range(node_number), ...]
     # only good if same topology is used for all the graphs in the batch
     edge_features = calculate_edge_features(delta_y_t, edge_index, node_number=node_number)
     return delta_x_hat_t_1, delta_x_wave_t_1, delta_y_t, delta_y_t_i, edge_features
 
 
+def _build_consensus_layer(consensus_layer: str | None, signal_dim):
+    consensus_layer_normalized = None if consensus_layer is None else str(consensus_layer).strip().lower()
+    if consensus_layer_normalized in {None, "", "none", "identity"}:
+        return None
+    elif consensus_layer_normalized in {"simple", "simpleconv"}:
+        return SimpleConv(aggr="mean")
+    elif consensus_layer_normalized in {"gcn", "gcnconv"}:
+        return GCNConv(
+            in_channels=signal_dim,
+            out_channels=signal_dim,
+            aggr="mean",
+            normalize=True,
+            add_self_loops=True,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported consensus_layer={consensus_layer!r}; use 'none', 'simple', or 'gcn'."
+        )
+
+
 class GraphKalmanFilter(torch.nn.Module):
 
     def __init__(self, f_system, signal_dim, node_kalman_dim, edge_features_dim, r_array,
-                 hidden_dim, heads=1, dropout=0.0, learn_edge_kalman=True):
+                 hidden_dim, heads=1, dropout=0.0, learn_edge_kalman=True, consensus_layer: str | None = "none"):
         super(GraphKalmanFilter, self).__init__()
         self.signal_dim = signal_dim
         self.measurement_dim = edge_features_dim
@@ -189,9 +228,7 @@ class GraphKalmanFilter(torch.nn.Module):
                 node_noise_dim=hidden_dim, h_mat_dim=edge_features_dim * signal_dim, delta_y_dim=edge_features_dim,
                 hidden_dim=hidden_dim, out_dim=signal_dim
             )
-        self.gcn = SimpleConv(aggr='mean')
-        # self.gcn = None
-        # self.gcn = GCNConv(in_channels=2*signal_dim, out_channels=signal_dim, aggr='mean')
+        self.gcn = _build_consensus_layer(consensus_layer, signal_dim)
         self.f = f_system
         self.q = 1
 
@@ -199,22 +236,24 @@ class GraphKalmanFilter(torch.nn.Module):
                 delta_y_innov_i, edge_index, adj_matrix, hidden_r, pred_sigma):
         node_number = measurements.shape[1]
         x_pred_t_t_1, y_pred_t_t_1 = self.prediction_step(x_pred_t_1_t_1, h_system)
+
         edge_kalman_filter_summed, h_mat = self.edge_kalman(x_pred_t_t_1, measurements, h_system, adj_matrix,
                                                             node_number=node_number)
         h_mat_i, h_mat_edges = self.calculate_h_mat_features(h_mat.transpose(1, 2), edge_index, node_number)
+
         delta_y_t_i, edge_features, x_features, y_innov_features = self.calculate_features_for_gnn(
             delta_y_innov_i, edge_index, h_mat_i, measurements, node_number, x_pred_t_1_t_1,
             x_pred_t_1_t_2, x_pred_t_2_t_2, y_pred_t_t_1)
+
         node_kalman, r_gru_output, hidden_r, pred_sigma, edge_index = self.node_gnn_rnn(
-            x_features, delta_y_t_i, y_innov_features,
-            edge_index, hidden_r.float(), pred_sigma
+            x_features, delta_y_t_i, y_innov_features, edge_index, hidden_r.float(), pred_sigma
         )
         node_kalman_reshaped = node_kalman.reshape(-1, node_number, self.signal_dim, self.signal_dim)
         if self.learn_edge_kalman:
-            aggregated_cross_kalman = self.cross_kalman_gain(
+            cross_kalman = self.cross_kalman_gain(
                 r_gru_output, edge_index, h_mat_edge=h_mat_edges, delta_y=edge_features)
-            aggregated_cross_kalman_reshaped = aggregated_cross_kalman.reshape(-1, node_number, self.signal_dim, 1)
-            phi_pred_t_t = x_pred_t_t_1.float() + node_kalman_reshaped.float() @ aggregated_cross_kalman_reshaped.float()
+            cross_kalman_reshaped = cross_kalman.reshape(-1, node_number, self.signal_dim, 1)
+            phi_pred_t_t = x_pred_t_t_1.float() + node_kalman_reshaped.float() @ cross_kalman_reshaped.float()
         else:
             phi_pred_t_t = x_pred_t_t_1.float() + node_kalman_reshaped.float() @ edge_kalman_filter_summed.float()
         # diffusion consensus step
@@ -233,32 +272,42 @@ class GraphKalmanFilter(torch.nn.Module):
         delta_x_hat_t_1, delta_x_wave_t_1, _, delta_y_t_i, edge_features = extract_kalman_features(
             edge_index, measurements, x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2, y_pred_t_t_1, node_number
         )
+
         x_features = torch.cat([delta_x_hat_t_1[..., 0], delta_x_wave_t_1[..., 0]], dim=-1)
         x_features = x_features.reshape(-1, 2 * self.signal_dim).float()
         delta_y_t_i = delta_y_t_i.reshape(-1, self.measurement_dim).float()
         delta_y_innov_i = delta_y_innov_i.reshape(-1, self.measurement_dim).float()
-        # all_edge_features = torch.cat([edge_features, h_mat_edges], dim=-1)
         y_innov_features = torch.cat([delta_y_innov_i, h_mat_i], dim=-1).float()
+
         return delta_y_t_i, edge_features, x_features, y_innov_features
 
     def calculate_h_mat_features(self, h_mat, edge_index, node_number):
-        node_list = [i for i in range(node_number)]
         h_mat_edges = calculate_edge_features(h_mat, edge_index, node_number)[..., 0]
-        h_mat_i = h_mat[:, node_list, node_list, ...]
+        h_mat_i = h_mat[:, range(node_number), range(node_number), ...]
         h_mat_i = h_mat_i.reshape(-1, self.signal_dim * self.measurement_dim)
         return h_mat_i, h_mat_edges
 
     def prediction_step(self, x_pred_t_1_t_1, h_system):
-        x_pred_t_t_1 = self.f(x_pred_t_1_t_1)
-        y_pred_t_t_1 = torch.Tensor(h_system(x_pred_t_t_1))
-        x_pred_t_t_1 = torch.Tensor(x_pred_t_t_1)
+        # Call system function; it may return numpy arrays or tensors — normalize to torch tensor
+        x_pred_t_t_1_raw = self.f(x_pred_t_1_t_1)
+        x_pred_t_t_1 = self._to_tensor(value=x_pred_t_t_1_raw, ref=x_pred_t_1_t_1)
+
+        y_pred_raw = h_system(x_pred_t_t_1)
+        y_pred_t_t_1 = self._to_tensor(value=y_pred_raw, ref=x_pred_t_t_1)
+
         return x_pred_t_t_1, y_pred_t_t_1
+
+    @staticmethod
+    def _to_tensor(value, ref):
+        if isinstance(value, torch.Tensor):
+            return value.to(device=ref.device, dtype=ref.dtype)
+        return torch.tensor(value, dtype=ref.dtype, device=ref.device)
 
 
 class GraphKalmanProcess(pl.LightningModule):
     def __init__(self, f_system, signal_dim, edge_features_dim, node_kalman_dim, edge_kalman_dim, r_array,
                  hidden_dim=32, heads=1, dropout=0.0,
-                 lr=1e-3, learn_edge_kalman=True, x0_scale=10):
+                 lr=1e-3, learn_edge_kalman=True, x0_scale=10, consensus_layer: str | None = "none"):
         super(GraphKalmanProcess, self).__init__()
         self.signal_dim = signal_dim
         self.hidden_dim = hidden_dim
@@ -268,21 +317,22 @@ class GraphKalmanProcess(pl.LightningModule):
         self.x0_scale = x0_scale
         self.gkf = GraphKalmanFilter(
             f_system, signal_dim, node_kalman_dim,
-            edge_features_dim, r_array, hidden_dim, heads, dropout, learn_edge_kalman
+            edge_features_dim, r_array, hidden_dim, heads, dropout, learn_edge_kalman, consensus_layer=consensus_layer
         )
         self.loss = torch.nn.MSELoss()
         self.lr = lr
 
-    def forward(self, data, x_0: torch.Tensor = None):
+    def forward(self, data, x_0: torch.Tensor | None = None):
         if isinstance(data, Batch):
             graph_number = len(data)
             h_system = data[0].h_system
         else:
             graph_number = 1
             h_system = data.h_system
+
         node_number = data.num_nodes // graph_number
         measurements_shape = (graph_number, node_number,) + data.x.shape[1:]  # (BATCH, NODE_NUM, Time_steps, 1)
-        x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2, delta_y_innov_i, edge_index, hidden_r, pred_sigma = self.initiate_graph_kalman_parameters(
+        x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2, delta_y_innov_i, edge_index, hidden_r, pred_sigma = self.init_graph_kalman_params(
             x_0, data, measurements_shape)
         measurements = data.x.reshape(*measurements_shape)
         time_steps_number = measurements.shape[-2]
@@ -297,24 +347,25 @@ class GraphKalmanProcess(pl.LightningModule):
             x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2 = x_pred_t_t, x_pred_t_t_1, x_pred_t_1_t_1
         return x_pred_t
 
-    def initiate_graph_kalman_parameters(self, x_0: torch.Tensor, data: Data, measurement_shape: tuple):
+    def init_graph_kalman_params(self, x_0: torch.Tensor | None, data: Data | Batch, measurement_shape: tuple):
         batch_size, node_number = measurement_shape[0], measurement_shape[1]
         if x_0 is None:
             x_0 = self.x0_scale * torch.ones(
-                batch_size, node_number, self.signal_dim, 1, dtype=torch.float)  # (batch, node_number, 2, 1)
+                batch_size, node_number, self.signal_dim, 1, dtype=torch.float,
+                device=self.device)  # (batch, node_number, 2, 1)
         edge_index = data.edge_index
-        delta_y_innov_i = torch.zeros(measurement_shape, dtype=torch.float)[:, :, 0, ...]
+        delta_y_innov_i = torch.zeros(measurement_shape, dtype=torch.float, device=self.device)[:, :, 0, ...]
         # todo: check whether the init of the hidden state are necessary
-        hidden_r = torch.randn((1, data.num_nodes, self.hidden_dim),
-                               dtype=torch.float)  # (1, node_number, hidden_dim)
-        pred_sigma = torch.randn((data.num_nodes, self.signal_dim * self.signal_dim),
-                                 dtype=torch.float)  # (node_number, output_dim)
+        hidden_r = torch.zeros(
+            (1, batch_size * node_number, self.hidden_dim), dtype=torch.float, device=self.device)  # (1, node_number, hidden_dim)
+        pred_sigma = torch.zeros(
+            (batch_size * node_number, self.signal_dim * self.signal_dim), dtype=torch.float, device=self.device)  # (node_number, output_dim)
         x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2 = x_0, x_0, x_0  # (batch, node_number, 2, 1)
         return x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2, delta_y_innov_i, edge_index, hidden_r, pred_sigma
 
     def _shared_step(self, batch, batch_idx, mode='train'):
         x_true = batch.y.reshape(batch.num_graphs, -1, self.signal_dim, 1)
-        x_pred = self(batch)
+        x_pred = self(batch).to(device=x_true.device)
         loss = loss_function(x_pred, x_true)
         self.log(f'{mode}_loss:', loss, batch_size=len(batch), on_step=True, on_epoch=True, prog_bar=True)
         return loss
@@ -329,9 +380,10 @@ class GraphKalmanProcess(pl.LightningModule):
         return self(batch)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
         return [optimizer], [scheduler]
+        # return optimizer
 
     def on_before_optimizer_step(self, optimizer: Optimizer) -> None:
         with torch.no_grad():
