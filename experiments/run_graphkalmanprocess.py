@@ -97,6 +97,68 @@ def _build_system(system_cfg: dict, node_num: int):
     return f_true, f_model, h_system
 
 
+def _build_graph_dataloaders(
+    *,
+    graph,
+    f_true,
+    h_system,
+    q: float,
+    r_array,
+    train_sims: int,
+    val_sims: int,
+    time_steps: int,
+    n_expansions: int,
+    x0_scale: float,
+    seed: int,
+    batch_size: int,
+):
+    train_ds = GraphDataset(
+        graph,
+        f_true,
+        h_system,
+        q,
+        r_array,
+        monte_carlo_simulations=train_sims,
+        time_steps=time_steps,
+        n_expansions=n_expansions,
+        x0=x0_scale,
+        seed=seed,
+    )
+    val_ds = GraphDataset(
+        graph,
+        f_true,
+        h_system,
+        q,
+        r_array,
+        monte_carlo_simulations=val_sims,
+        time_steps=time_steps,
+        n_expansions=n_expansions,
+        x0=x0_scale,
+        seed=seed,
+    )
+    train_loader = DataLoader(train_ds, shuffle=True, batch_size=batch_size)
+    val_loader = DataLoader(val_ds, shuffle=False, batch_size=batch_size)
+    return train_loader, val_loader
+
+
+def _curriculum_schedule(curriculum_cfg: dict, base_time_steps: int) -> list[int]:
+    if not bool(curriculum_cfg.get("enabled", False)):
+        return [base_time_steps]
+
+    start = int(curriculum_cfg.get("start_time_steps", 10))
+    step = int(curriculum_cfg.get("step_time_steps", 10))
+    maximum = int(curriculum_cfg.get("max_time_steps", base_time_steps))
+    if step <= 0:
+        raise ValueError("curriculum.step_time_steps must be positive")
+    if maximum < start:
+        raise ValueError("curriculum.max_time_steps must be >= curriculum.start_time_steps")
+
+    schedule = list(range(start, maximum + 1, step))
+    if base_time_steps not in schedule:
+        schedule.append(base_time_steps)
+    return sorted(set(schedule))
+
+
 def run_one_experiment(cfg: dict, *, run_name: str, root_dir: Path) -> RunResult:
     print(f"\n=== Run: {run_name} ===")
     print(json.dumps(cfg, indent=2, sort_keys=True))
@@ -124,34 +186,6 @@ def run_one_experiment(cfg: dict, *, run_name: str, root_dir: Path) -> RunResult
     r_array = r_scale * np.ones(node_num)
     f_true, f_model, h_system = _build_system(cfg["system"], node_num=node_num)
 
-    train_ds = GraphDataset(
-        graph,
-        f_true,
-        h_system,
-        q,
-        r_array,
-        monte_carlo_simulations=int(cfg["data"]["train_sims"]),
-        time_steps=time_steps,
-        n_expansions=n_expansions,
-        x0=x0_scale,
-        seed=int(cfg["seed"]),
-    )
-    val_ds = GraphDataset(
-        graph,
-        f_true,
-        h_system,
-        q,
-        r_array,
-        monte_carlo_simulations=int(cfg["data"]["val_sims"]),
-        time_steps=time_steps,
-        n_expansions=n_expansions,
-        x0=x0_scale,
-        seed=int(cfg["seed"]),
-    )
-
-    train_loader = DataLoader(train_ds, shuffle=True, batch_size=batch_size)
-    val_loader = DataLoader(val_ds, shuffle=False, batch_size=batch_size)
-
     model_cfg = cfg["model"]
     model = GraphKalmanProcess(
         f_model,
@@ -169,36 +203,64 @@ def run_one_experiment(cfg: dict, *, run_name: str, root_dir: Path) -> RunResult
         consensus_layer=model_cfg.get("consensus_layer", "none"),
     ).to(torch.float)
 
+    curriculum_cfg = cfg.get("curriculum", {})
+    schedule = _curriculum_schedule(curriculum_cfg, base_time_steps=time_steps)
+    epochs_per_stage = int(curriculum_cfg.get("epochs_per_stage", cfg["trainer"]["max_epochs"]))
+    stage_max_epochs = epochs_per_stage if bool(curriculum_cfg.get("enabled", False)) else int(cfg["trainer"]["max_epochs"])
+
     log_root = root_dir / "lightning_logs"
-    logger = pl.loggers.CSVLogger(save_dir=str(log_root), name="graphkalmanprocess", version=run_name)
+    monitor_key = "val_loss"
+    best_val: float | None = None
+    best_path: str | None = None
+    last_log_dir: str | None = None
 
-    monitor_key = "val_loss:_epoch"
-    early_stopping = pl.callbacks.EarlyStopping(
-        monitor=monitor_key,
-        patience=int(cfg["trainer"]["early_stop_patience"]),
-        verbose=True,
-        mode="min",
-        min_delta=float(cfg["trainer"]["early_stop_min_delta"]),
-    )
-    checkpoint = pl.callbacks.ModelCheckpoint(
-        monitor=monitor_key,
-        mode="min",
-        save_top_k=1,
-        filename="best-{epoch}",
-    )
+    for stage_idx, stage_time_steps in enumerate(schedule):
+        train_loader, val_loader = _build_graph_dataloaders(
+            graph=graph,
+            f_true=f_true,
+            h_system=h_system,
+            q=q,
+            r_array=r_array,
+            train_sims=int(cfg["data"]["train_sims"]),
+            val_sims=int(cfg["data"]["val_sims"]),
+            time_steps=stage_time_steps,
+            n_expansions=n_expansions,
+            x0_scale=x0_scale,
+            seed=int(cfg["seed"]),
+            batch_size=batch_size,
+        )
 
-    trainer = pl.Trainer(
-        max_epochs=int(cfg["trainer"]["max_epochs"]),
-        accelerator="auto",
-        log_every_n_steps=int(cfg["trainer"]["log_every_n_steps"]),
-        callbacks=[early_stopping, checkpoint],
-        gradient_clip_val=float(cfg["trainer"].get("gradient_clip_val", 0.0)),
-        logger=logger,
-        default_root_dir=str(root_dir),
-    )
-    trainer.fit(model, train_loader, val_loader)
-    best_val = checkpoint.best_model_score.item() if checkpoint.best_model_score is not None else None
-    best_path = checkpoint.best_model_path or None
+        stage_run_name = run_name if len(schedule) == 1 else f"{run_name}__ts{stage_time_steps}"
+        logger = pl.loggers.CSVLogger(save_dir=str(log_root), name="graphkalmanprocess", version=stage_run_name)
+        early_stopping = pl.callbacks.EarlyStopping(
+            monitor=monitor_key,
+            patience=int(cfg["trainer"]["early_stop_patience"]),
+            verbose=True,
+            mode="min",
+            min_delta=float(cfg["trainer"]["early_stop_min_delta"]),
+        )
+        checkpoint = pl.callbacks.ModelCheckpoint(
+            monitor=monitor_key,
+            mode="min",
+            save_top_k=1,
+            filename="best-{epoch}",
+        )
+        trainer = pl.Trainer(
+            max_epochs=stage_max_epochs,
+            accelerator="auto",
+            log_every_n_steps=int(cfg["trainer"]["log_every_n_steps"]),
+            callbacks=[early_stopping, checkpoint],
+            gradient_clip_val=float(cfg["trainer"].get("gradient_clip_val", 0.0)),
+            logger=logger,
+            default_root_dir=str(root_dir),
+        )
+        trainer.fit(model, train_loader, val_loader)
+        stage_best_val = checkpoint.best_model_score.item() if checkpoint.best_model_score is not None else None
+        stage_best_path = checkpoint.best_model_path or None
+        if stage_best_val is not None and (best_val is None or stage_best_val < best_val):
+            best_val = stage_best_val
+            best_path = stage_best_path
+        last_log_dir = str(Path(logger.log_dir))
 
     eval_loss = None
     eval_cfg = cfg.get("eval")
@@ -210,7 +272,7 @@ def run_one_experiment(cfg: dict, *, run_name: str, root_dir: Path) -> RunResult
 
         eval_loss = evaluate_on_graph(
             model=model,
-            cfg=cfg,
+            cfg={**cfg, "data": {**cfg["data"], "time_steps": schedule[-1]}},
             eval_cfg=eval_cfg,
         )
 
@@ -218,7 +280,7 @@ def run_one_experiment(cfg: dict, *, run_name: str, root_dir: Path) -> RunResult
         run_name=run_name,
         best_val=best_val,
         best_checkpoint=best_path,
-        log_dir=str(Path(logger.log_dir)),
+        log_dir=last_log_dir or str(log_root),
         eval_loss=eval_loss,
     )
 

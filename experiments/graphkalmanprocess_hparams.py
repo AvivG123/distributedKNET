@@ -42,7 +42,7 @@ BASELINE: dict = {
         "hidden_dim": 64,
         "heads": 1,
         "dropout": 0.0,
-        "lr": 2e-5,
+        "lr": 5e-5,
         "learn_edge_kalman": False,
         # Diffusion/consensus step at the end of GraphKalmanFilter:
         # "none" (default), "simple" (SimpleConv), "gcn" (GCNConv).
@@ -50,11 +50,18 @@ BASELINE: dict = {
         "x0_scale": 1.0,
     },
     "trainer": {
-        "max_epochs": 40,
-        "log_every_n_steps": 5,
-        "early_stop_patience": 10,
+        "max_epochs": 20,
+        "log_every_n_steps": 50,
+        "early_stop_patience": 5,
         "early_stop_min_delta": 0.01,
         "gradient_clip_val": 0.0,
+    },
+    "curriculum": {
+        "enabled": False,
+        "start_time_steps": 10,
+        "step_time_steps": 10,
+        "max_time_steps": 30,
+        "epochs_per_stage": 3,
     },
 }
 
