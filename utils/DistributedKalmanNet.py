@@ -467,7 +467,7 @@ class GraphKalmanProcess(pl.LightningModule):
         return self(batch)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
         return [optimizer], [scheduler]
         # return optimizer

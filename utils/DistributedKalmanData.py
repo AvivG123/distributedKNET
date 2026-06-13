@@ -137,11 +137,11 @@ class HSystem:
 
     def h1(self, x):
         # x = x.to(torch.float)
-        return torch.tensor([[0., 1.],], dtype=torch.float, device=x.device) @  self.rotation_matrix.to(device=x.device) @ (x * (x**2+1e-6)**0.1)
+        return torch.tensor([[0., 1.],], dtype=torch.float, device=x.device) @  self.rotation_matrix.to(device=x.device) @ (torch.sign(x) * (x**2)**0.6)
 
     def h2(self, x):
         # x = x.to(torch.float)
-        return torch.tensor([[1., 0.],], dtype=torch.float, device=x.device) @  self.rotation_matrix.to(device=x.device) @ (x + torch.arctan(x))
+        return torch.tensor([[1., 0.],], dtype=torch.float, device=x.device) @  self.rotation_matrix.to(device=x.device) @ (x + torch.tanh(x))
 
     def func(self, x, n_expansions=0):
         return self(x, n_expansions=n_expansions)
