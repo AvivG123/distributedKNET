@@ -7,8 +7,9 @@ from utils.DistributedKalmanNet import loss_function
 
 
 class GnnRnnLightning(pl.LightningModule):
-    def __init__(self, input_dim=1, type_num=2, hidden_dim=32, output_dim=2, lr=5e-5):
+    def __init__(self, input_dim=1, type_num=2, hidden_dim=32, output_dim=4, lr=5e-5):
         super(GnnRnnLightning, self).__init__()
+        self.output_dim = output_dim
         self.fc_measurement = torch.nn.Sequential(
             torch.nn.Linear(input_dim, hidden_dim),
             torch.nn.LeakyReLU(),
@@ -37,10 +38,17 @@ class GnnRnnLightning(pl.LightningModule):
         self.lr = lr
         self.loss = torch.nn.MSELoss()
 
-    def forward(self, measurements, node_types, edge_index, hidden):
+    def forward(self, measurements, node_types, edge_index, hidden=None):
         all_node_num = measurements.shape[0]
         time_steps = measurements.shape[1]
-        x_pred_t = torch.zeros(all_node_num, time_steps, self.fc_output[-1].out_features)
+        device = measurements.device
+        dtype = measurements.dtype
+        node_types = node_types.to(device=device).long().view(all_node_num, -1)
+        edge_index = edge_index.to(device=device)
+        x_pred_t = torch.zeros(
+            all_node_num, time_steps, self.output_dim,
+            dtype=dtype, device=device,
+        )
         for i in range(time_steps):
             measurement = measurements[:, i, ...]
             measurement_features = self.fc_measurement(measurement)
@@ -59,13 +67,19 @@ class GnnRnnLightning(pl.LightningModule):
         x_gnn = self.activation(x_gnn)
         return x_gnn
 
+    @staticmethod
+    def _node_types_from_batch(batch, node_number):
+        h_system = batch.h_system[0] if isinstance(batch.h_system, (list, tuple)) else batch.h_system
+        node_classification = h_system.node_classification[:node_number]
+        return node_classification.repeat(batch.num_graphs, 1)
+
     def _shared_step(self, batch, batch_idx, mode='train'):
-        node_classification = batch.h_system[0].node_classification.repeat_interleave(
-            batch.num_graphs, dim=0).int()
         node_number = batch.x.shape[0] // batch.num_graphs
-        x_true = batch.y.reshape(batch.num_graphs, batch.x.shape[1], -1)
+        node_classification = self._node_types_from_batch(batch, node_number)
+        x_true = batch.y.reshape(batch.num_graphs, -1, self.output_dim, 1)
         x_pred = self(batch.x, node_classification, batch.edge_index, None)
-        x_pred = x_pred.reshape(batch.num_graphs, node_number, batch.x.shape[1], -1)
+        x_pred = x_pred.reshape(batch.num_graphs, node_number, batch.x.shape[1], self.output_dim)
+        x_pred = x_pred.permute(0, 2, 1, 3).unsqueeze(-1)
 
         loss = loss_function(x_pred, x_true)
         self.log(f'{mode}_loss:', loss, batch_size=len(batch), on_step=True, on_epoch=True, prog_bar=True)
