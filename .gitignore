@@ -20,3 +20,5 @@ venv/
 
 # Local model artifacts (per-user)
 models
+checkpoints
+logs
