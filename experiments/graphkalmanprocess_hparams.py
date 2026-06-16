@@ -54,14 +54,14 @@ BASELINE: dict = {
         "log_every_n_steps": 50,
         "early_stop_patience": 5,
         "early_stop_min_delta": 0.01,
-        "gradient_clip_val": 0.0,
+        "gradient_clip_val": 1.0,
     },
     "curriculum": {
         "enabled": False,
         "start_time_steps": 10,
         "step_time_steps": 10,
-        "max_time_steps": 30,
-        "epochs_per_stage": 3,
+        "max_time_steps": 20,
+        "epochs_per_stage": 10,
     },
 }
 

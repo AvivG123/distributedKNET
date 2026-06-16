@@ -209,6 +209,7 @@ def run_one_experiment(cfg: dict, *, run_name: str, root_dir: Path) -> RunResult
     stage_max_epochs = epochs_per_stage if bool(curriculum_cfg.get("enabled", False)) else int(cfg["trainer"]["max_epochs"])
 
     log_root = root_dir / "lightning_logs"
+    log_root.mkdir(parents=True, exist_ok=True)
     monitor_key = "val_loss"
     best_val: float | None = None
     best_path: str | None = None
@@ -232,6 +233,7 @@ def run_one_experiment(cfg: dict, *, run_name: str, root_dir: Path) -> RunResult
 
         stage_run_name = run_name if len(schedule) == 1 else f"{run_name}__ts{stage_time_steps}"
         logger = pl.loggers.CSVLogger(save_dir=str(log_root), name="graphkalmanprocess", version=stage_run_name)
+        Path(logger.log_dir).mkdir(parents=True, exist_ok=True)
         early_stopping = pl.callbacks.EarlyStopping(
             monitor=monitor_key,
             patience=int(cfg["trainer"]["early_stop_patience"]),
