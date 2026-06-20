@@ -1,26 +1,150 @@
 # distributedKNET
-repo of thesis project - Distributed deep kalman filter
 
-## Hyperparameters & Experiments (GraphKalmanProcess)
-Use `experiments/run_graphkalmanprocess.py` to run one training or a simple sweep and get a single CSV you can compare.
+Distributed Kalman filtering and KalmanNet-style graph models for the thesis codebase.
 
-- Presets + named sweeps live in `experiments/graphkalmanprocess_hparams.py`.
-- Results are written to `experiments/results/*.csv` and per-run logs go to `lightning_logs/graphkalmanprocess/*`.
+This repository contains the implementation used to train, evaluate, and compare:
 
-Single run:
-- `python -m experiments.run_graphkalmanprocess --preset baseline`
-- Override any value with dotted keys: `python -m experiments.run_graphkalmanprocess --preset baseline --override model.hidden_dim=128 --override model.lr=1e-4`
+- a classical diffusion EKF baseline
+- `GraphKalmanProcess` / Distributed KalmanNet
+- a GNN-RNN baseline
 
-Named sweep:
-- `python -m experiments.run_graphkalmanprocess --preset baseline --sweep hidden_dim_x_lr`
+The code supports both nonlinear and linear system variants, with matched and mismatched process models.
 
-Ad-hoc grid (cartesian product):
-- `python -m experiments.run_graphkalmanprocess --preset baseline --grid model.hidden_dim=32,64,128 --grid model.lr=1e-4,3e-5`
+## Repository Layout
 
-Noise + mismatch sweeps (built-in flags):
-- Sweep measurement noise: `python -m experiments.run_graphkalmanprocess --preset baseline --r-scales 0.5,1,2`
-- Sweep process + measurement noise: `python -m experiments.run_graphkalmanprocess --preset baseline --q-values 0.1,1 --r-scales 0.5,1,2`
-- With/without mismatch (duplicates each run): `python -m experiments.run_graphkalmanprocess --preset baseline --r-scales 0.5,1,2 --with-without-mismatch --mismatch-angle-deg 20`
+- `utils/` - core model, data, and filtering utilities
+- `experiments/` - experiment runners, presets, and hyperparameter sweeps
+- `tests/` - unit tests
+- `models/` - saved model checkpoints and model-related artifacts
+- `try_models/` - exploratory model variants
+- `figures/` - generated plots
+- `notebooks/` - exploratory notebooks and ad hoc analysis
 
-Evaluation on a graph (post-training):
-- `python -m experiments.run_graphkalmanprocess --preset baseline --eval --eval-sims 1024`
+Generated logs, cached outputs, and notebook artifacts are intentionally kept out of the main workflow.
+
+## Requirements
+
+The project is built around:
+
+- Python 3.12
+- PyTorch
+- PyTorch Lightning
+- PyTorch Geometric
+- NumPy
+- Matplotlib
+- tqdm
+
+The repository was developed in a local virtual environment. If you are recreating it from scratch, install the dependencies that match your environment and accelerator support.
+
+## Installation
+
+Clone the repository and create a virtual environment, then install the project dependencies.
+
+Typical setup:
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -U pip
+pip install torch pytorch-lightning torch-geometric numpy matplotlib tqdm
+```
+
+Depending on your platform, PyTorch Geometric may require the installation sequence recommended by the official PyG documentation for your Torch and CUDA versions.
+
+## Experiments
+
+The main experiment entry point is:
+
+```bash
+python -m experiments.run_graphkalmanprocess --preset baseline
+```
+
+The runner supports single runs, sweeps, and evaluation on a fresh graph dataset.
+
+Common options:
+
+- override a config value:
+
+```bash
+python -m experiments.run_graphkalmanprocess --preset baseline --override model.hidden_dim=128 --override model.lr=1e-4
+```
+
+- run a named sweep:
+
+```bash
+python -m experiments.run_graphkalmanprocess --preset baseline --sweep hidden_dim_x_lr
+```
+
+- run a cartesian grid:
+
+```bash
+python -m experiments.run_graphkalmanprocess --preset baseline --grid model.hidden_dim=32,64,128 --grid model.lr=1e-4,3e-5
+```
+
+- sweep measurement noise:
+
+```bash
+python -m experiments.run_graphkalmanprocess --preset baseline --r-scales 0.5,1,2
+```
+
+- sweep process noise and measurement noise:
+
+```bash
+python -m experiments.run_graphkalmanprocess --preset baseline --q-values 0.1,1 --r-scales 0.5,1,2
+```
+
+- compare matched and mismatched dynamics:
+
+```bash
+python -m experiments.run_graphkalmanprocess --preset baseline --r-scales 0.5,1,2 --with-without-mismatch --mismatch-angle-deg 20
+```
+
+- evaluate the best checkpoint after training:
+
+```bash
+python -m experiments.run_graphkalmanprocess --preset baseline --eval --eval-sims 1024
+```
+
+Results are written to `experiments/results/*.csv`, and Lightning logs are written to `lightning_logs/`.
+
+## Notebook Workflows
+
+The notebooks under `notebooks/` are exploratory and are not the primary entry point for the project. They are useful for reproducing plots, running ad hoc comparisons, and checking intermediate results.
+
+## Testing
+
+Run the test suite with:
+
+```bash
+pytest
+```
+
+The existing tests focus on model behavior and helper components. Add regression tests when changing shared training or inference logic.
+
+## Outputs
+
+Typical generated artifacts include:
+
+- CSV summaries in `experiments/results/`
+- Lightning logs in `lightning_logs/`
+- plots in `figures/`
+- checkpoints in `models/`
+
+These files are generated by experiments and should generally not be edited by hand.
+
+## Citation
+
+If you use this code in academic work, cite the paper or thesis associated with the repository.
+
+Example:
+
+```bibtex
+@misc{distributedknet,
+  title        = {distributedKNET},
+  author       = {Author Name},
+  year         = {2026},
+  note         = {Code for distributed Kalman filtering and KalmanNet-style graph models}
+}
+```
+
+Replace this placeholder with the final bibliographic entry for the paper or thesis.
