@@ -122,6 +122,12 @@ without it. If dependencies are missing, report exactly what could not be run.
   named experimental variants.
 - Keep one-off runtime changes as CLI overrides when possible:
   `--override dotted.key=value`.
+- For noise comparison experiments, train a separate model for each noise level
+  instead of evaluating one checkpoint across all `r_scale` values.
+- For mismatch comparison experiments, train matched and mismatched conditions
+  separately. Do not reuse a matched checkpoint for mismatched evaluation, or a
+  mismatched checkpoint for matched evaluation, unless the user explicitly asks
+  for cross-condition generalization.
 - Use `--dry-run` to validate run planning without training.
 - Avoid long training runs as validation unless the user requested them. Prefer
   `fast_debug`, tiny overrides, or dry runs for smoke checks.
