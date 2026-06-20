@@ -39,9 +39,11 @@ The most important code paths are:
 - `utils/BaselineModels.py`: learned baseline models.
 - `utils/reproducibility.py`: seed and deterministic behavior helpers.
 - `experiments/graphkalmanprocess_hparams.py`: presets and named sweeps.
-- `experiments/run_graphkalmanprocess.py`: main experiment, sweep, dry-run,
-  training, and evaluation entry point.
-- `tests/`: regression tests. Currently includes focused model behavior tests.
+- `experiments/run_graphkalmanprocess.py`: main experiment, sweep, grid,
+  noise/mismatch expansion, dry-run, training, and evaluation entry point.
+- `tests/`: regression tests. Current coverage includes
+  `tests/test_distributed_kalman_net.py`, which checks that
+  `AdaptiveMeanConv` stays learnable.
 
 ## Out of Scope by Default
 
@@ -120,8 +122,14 @@ without it. If dependencies are missing, report exactly what could not be run.
 
 - Use `PRESETS` and `SWEEPS` in `experiments/graphkalmanprocess_hparams.py` for
   named experimental variants.
+- Current presets are `baseline`, `edge_kalman_on`, `bigger_hidden`,
+  `mismatch_20deg`, and `fast_debug`; named sweeps are `hidden_dim_x_lr`,
+  `edge_kalman_toggle`, and `dropout`.
 - Keep one-off runtime changes as CLI overrides when possible:
   `--override dotted.key=value`.
+- Use `--grid` for ad hoc cartesian sweeps; use `--r-scales`, `--q-values`, or
+  `--with-without-mismatch` when you need the runner to expand a planned set of
+  runs into separate CSV rows.
 - For noise comparison experiments, train a separate model for each noise level
   instead of evaluating one checkpoint across all `r_scale` values.
 - For mismatch comparison experiments, train matched and mismatched conditions
@@ -132,6 +140,8 @@ without it. If dependencies are missing, report exactly what could not be run.
 - Avoid long training runs as validation unless the user requested them. Prefer
   `fast_debug`, tiny overrides, or dry runs for smoke checks.
 - Results are written to `experiments/results/*.csv`.
+- Result CSV rows include the flattened config plus `run_name`,
+  `best_val_loss`, `best_checkpoint`, `log_dir`, and `eval_loss`.
 - Lightning logs are written to `lightning_logs/`.
 - When changing output fields or metrics, update code and documentation
   together.
