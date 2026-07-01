@@ -7,6 +7,10 @@ Use `experiments/run_graphkalmanprocess.py` to run one training or a simple swee
 - Presets + named sweeps live in `experiments/graphkalmanprocess_hparams.py`.
 - Results are written to `experiments/results/*.csv` and per-run logs go to `lightning_logs/graphkalmanprocess/*`.
 
+Constant-velocity DKN/GNN-RNN workflow:
+- `python -m experiments.run_graphkalmanprocess --localization`
+- Skip the prompt: `python -m experiments.run_graphkalmanprocess --localization --description "baseline run"`
+
 Single run:
 - `python -m experiments.run_graphkalmanprocess --preset baseline`
 - Override any value with dotted keys: `python -m experiments.run_graphkalmanprocess --preset baseline --override model.hidden_dim=128 --override model.lr=1e-4`
