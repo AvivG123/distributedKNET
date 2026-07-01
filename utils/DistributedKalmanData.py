@@ -32,6 +32,20 @@ def _randn(shape: tuple[int, ...], *, seed: int | None) -> np.ndarray:
     return np.random.RandomState(int(seed)).randn(*shape)
 
 
+def build_bidirectional_edge_index(graph: nx.Graph) -> torch.Tensor:
+    """Build a directed PyG edge_index from an undirected NetworkX graph."""
+
+    edge_pairs = np.asarray(list(graph.edges()), dtype=np.int64)
+    if edge_pairs.size == 0:
+        return torch.empty((2, 0), dtype=torch.int64)
+
+    non_self_mask = edge_pairs[:, 0] != edge_pairs[:, 1]
+    reverse_pairs = edge_pairs[non_self_mask][:, [1, 0]]
+    directed_pairs = np.concatenate([edge_pairs, reverse_pairs], axis=0)
+    directed_pairs = np.unique(directed_pairs, axis=0)
+    return torch.tensor(directed_pairs.T, dtype=torch.int64)
+
+
 def generate_data_points(
     f: Any,
     q: float,
@@ -78,7 +92,7 @@ class CreateGraph:
         self.graph.add_edges_from([(i, i) for i in range(node_num)])
         self.adj_matrix = np.asarray(nx.adjacency_matrix(self.graph).todense())
         self.edges = list(self.graph.edges())
-        self.edge_index = torch.tensor(np.array(self.edges).T, dtype=torch.int64)
+        self.edge_index = build_bidirectional_edge_index(self.graph)
 
 
 class FSystem:
@@ -218,31 +232,91 @@ class HSystemLinear:
 class GraphDataset(Dataset):
     def __init__(
             self, g, f_system, h_system, q, r_array, monte_carlo_simulations=1000,
-            time_steps=100, n_expansions=0, x0=10, *, seed: int | None = 42
+            time_steps=100, n_expansions=0, x0=10, state_dim=2, *, seed: int | None = 42
     ):
         super(GraphDataset, self).__init__()
+        self.state_dim = state_dim
+        if isinstance(g, np.ndarray):
+            self.nx_graph = nx.from_numpy_array(g)
+            self.adj_matrix = g
+        else:
+            self.nx_graph = g.graph
+            self.adj_matrix = np.array(g.adj_matrix)
         self.g = g
-        self.r_array = r_array
+        self.r_array = np.asarray(r_array, dtype=np.float32)
         self.monte_carlo_simulations = monte_carlo_simulations
         self.time_steps = time_steps
         self.seed = seed
-        self.x0 = (x0 * np.ones((self.monte_carlo_simulations, 2, 1), dtype=np.float32) +
-                   np.random.randn(self.monte_carlo_simulations, 2, 1))
+        self.x0 = self._build_initial_state_batch(x0)
         self.data_points = generate_data_points(f_system, q, self.x0, self.time_steps, seed=seed)
         self.measurements = self.generate_measurements(h_system, n_expansions, seed=seed)
         self.h_system = h_system
-        self._edge_index = g.edge_index if hasattr(g, "edge_index") else torch.tensor(np.array(g.edges).T, dtype=torch.int64)
-        self._adj_matrix = torch.tensor(np.asarray(g.adj_matrix), dtype=torch.float)
+        self._edge_index = g.edge_index if hasattr(g, "edge_index") else build_bidirectional_edge_index(self.nx_graph)
+        self._adj_matrix = torch.tensor(np.asarray(self.adj_matrix), dtype=torch.float)
+
+    def _build_initial_state_batch(self, x0):
+        noise = _randn(
+            (self.monte_carlo_simulations, self.state_dim, 1),
+            seed=self.seed,
+        ).astype(np.float32)
+
+        if np.isscalar(x0):
+            base_state = np.full((self.state_dim, 1), x0, dtype=np.float32)
+            return base_state[None, ...] + noise
+
+        x0_array = np.asarray(x0, dtype=np.float32)
+
+        if x0_array.shape == (self.state_dim,):
+            x0_array = x0_array[:, None]
+
+        if x0_array.shape == (self.state_dim, 1):
+            return x0_array[None, ...] + noise
+
+        expected_batch_shape = (self.monte_carlo_simulations, self.state_dim, 1)
+        if x0_array.shape == expected_batch_shape:
+            return x0_array
+
+        raise ValueError(
+            f"x0 must be a scalar, shape ({self.state_dim},), "
+            f"shape ({self.state_dim}, 1), or shape {expected_batch_shape}, "
+            f"but got shape {x0_array.shape}."
+        )
 
     def generate_measurements(self, h_func, n_expansions, *, seed: int | None):
-        # data_points: (mc, state_dim=2, 1, time) -> (2, mc*time)
-        data_to_pass = self.data_points.transpose(1, 2, -1, 0).reshape(2, -1)
-        measurements = generate_measurements(h_func, data_to_pass, self.r_array, n_expansions=n_expansions, seed=seed)
+        data_to_pass = self.data_points.transpose(1, 2, -1, 0).reshape(self.state_dim, -1)
+        measurements = h_func(data_to_pass, n_expansions=n_expansions)
         measurements = measurements.reshape(
-            self.g.graph.number_of_nodes(), 1, self.time_steps, self.monte_carlo_simulations
+            self.nx_graph.number_of_nodes(), 1, self.time_steps, self.monte_carlo_simulations
         )
         measurements = measurements.transpose(3, 0, 2, 1)
+
+        node_count = self.nx_graph.number_of_nodes()
+        if self.r_array.ndim == 0:
+            r_scale = np.full(node_count, float(self.r_array), dtype=np.float32)
+        else:
+            r_scale = self.r_array
+
+        measurement_noise = _randn(
+            (self.monte_carlo_simulations, node_count, self.time_steps, 1),
+            seed=seed,
+        ).astype(np.float32)
+
+        measurements = measurements + (r_scale[None, :, None, None] * measurement_noise)
+
+        if hasattr(h_func, "wrap_measurements"):
+            measurements = h_func.wrap_measurements(measurements, sensor_axis=1)
         return measurements
+
+    def create_dataset(self):
+        data_list = []
+        for idx in range(self.monte_carlo_simulations):
+            data = Data(x=torch.tensor(self.measurements[idx, ...], dtype=torch.float),
+                        edge_index=self._edge_index,
+                        y=torch.tensor(self.data_points[idx, ...].transpose(-1, 0, 1), dtype=torch.float),
+                        edge_attr=torch.zeros(self._edge_index.shape[1], 1, dtype=torch.float),
+                        adj_matrix=self._adj_matrix, h_system=self.h_system)
+            data_list.append(data)
+        return data_list
 
     def len(self):
         return self.monte_carlo_simulations

@@ -75,6 +75,52 @@ def _with(base: dict, updates: dict) -> dict:
             cfg[k] = v
     return cfg
 
+LOCALIZATION_BASELINE: dict = _with(BASELINE, {
+    "seed": 42,
+    "save_root": "my_models",
+    "system": {
+        "kind": "localization",
+        "time_delta": 0.1,
+        "area_size": 100.0,
+        "p0_scale": 10.0,
+        "use_dt_mismatch": True,
+        "dt_mismatch_values": [1.0, 2.0],
+    },
+    "graph": {
+        "node_num": 50,
+        "k_neighbors": 5,
+        "graph_seed": 42,
+    },
+    "data": {
+        "time_steps": 20,
+        "q": 1.0,
+        "measurement_noise_values": [1],
+        "train_sims": 20_000,
+        "val_sims": 256,
+        "batch_size": 64,
+        "num_trials": 50,
+        "preview_trajectories": 4,
+    },
+    "model": {
+        "signal_dim": 4,
+        "edge_features_dim": 1,
+        "node_kalman_dim": 16,
+        "edge_kalman_dim": 2,
+        "hidden_dim": 128,
+        "lr": 1e-3,
+        "learn_edge_kalman": True,
+        "train_models": ["dkn"],
+        "gnn_rnn_hidden_dim": 128,
+        "gnn_rnn_learning_rate": 1e-3,
+        "consensus_layer": "none",
+    },
+    "trainer": {
+        "max_epochs": 100,
+        "early_stop_patience": 5,
+        "early_stop_min_delta": 0.001,
+        "gradient_clip_val": 1,
+    },
+})
 
 PRESETS: dict[str, dict] = {
     "baseline": BASELINE,
