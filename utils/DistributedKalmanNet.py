@@ -16,7 +16,7 @@ from torch_geometric.utils import softmax
 
 torch.set_default_dtype(torch.float)
 
-ADAPTIVE_CONSENSUS_FEATURES = ("delta_y_innov", "delta_y", "h_mat_i")
+ADAPTIVE_CONSENSUS_FEATURES = ("delta_y_innov", "delta_y", "h_mat_i", "x_hat", "delta_x_hat_t_1")
 
 
 def loss_function(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
@@ -263,7 +263,7 @@ def _build_consensus_layer(consensus_layer: str | None, signal_dim, measurement_
     # adaptive mean attention-based consensus requires an input feature dimension
     elif _consensus_layer in {"adaptive", "adaptive_mean"}:
         return AdaptiveMeanConv(
-            in_channels=2 * measurement_dim + signal_dim * measurement_dim,
+            in_channels=2 * measurement_dim + signal_dim * measurement_dim + 2 * signal_dim,
             out_channels=signal_dim,
         )
     else:
@@ -312,7 +312,7 @@ class GraphKalmanFilter(torch.nn.Module):
                                                             node_number=node_number)
         h_mat_i, h_mat_edges = self.calculate_h_mat_features(h_mat.transpose(1, 2), edge_index, node_number)
 
-        delta_y_t_i, edge_features, x_features, y_innov_features = self.calculate_features_for_gnn(
+        delta_y_t_i, edge_features, x_features, y_innov_features, delta_x_hat_t_1 = self.calculate_features_for_gnn(
             delta_y_innov_i, edge_index, h_mat_i, measurements, node_number, x_pred_t_1_t_1,
             x_pred_t_1_t_2, x_pred_t_2_t_2, y_pred_t_t_1)
 
@@ -327,25 +327,34 @@ class GraphKalmanFilter(torch.nn.Module):
             phi_pred_t_t = x_pred_t_t_1.float() + node_kalman_reshaped.float() @ cross_kalman_reshaped.float()
         else:
             phi_pred_t_t = x_pred_t_t_1.float() + node_kalman_reshaped.float() @ edge_kalman_filter_summed.float()
-        x_pred_t_t = self._apply_consensus(phi_pred_t_t, edge_index, delta_y_innov_i, delta_y_t_i, h_mat_i)
+        x_pred_t_t = self._apply_consensus(
+            phi_pred_t_t,
+            edge_index,
+            delta_y_innov_i,
+            delta_y_t_i,
+            h_mat_i,
+            delta_x_hat_t_1,
+        )
         return x_pred_t_t.reshape(x_pred_t_t_1.shape), x_pred_t_t_1, edge_index, hidden_r, pred_sigma
 
     def calculate_features_for_gnn(self, delta_y_innov_i, edge_index, h_mat_i, measurements, node_number,
                                    x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2, y_pred_t_t_1: Tensor) -> tuple[
-        Tensor, Tensor, Tensor, Tensor]:
+        Tensor, Tensor, Tensor, Tensor, Tensor]:
         delta_x_hat_t_1, delta_x_wave_t_1, _, delta_y_t_i, edge_features = extract_kalman_features(
             edge_index, measurements, x_pred_t_1_t_1, x_pred_t_1_t_2, x_pred_t_2_t_2, y_pred_t_t_1, node_number
         )
 
+        delta_x_hat_t_1 = _flatten_node_signal(delta_x_hat_t_1[..., 0], self.signal_dim)
+        delta_x_wave_t_1 = _flatten_node_signal(delta_x_wave_t_1[..., 0], self.signal_dim)
         x_features = torch.cat([
-            _flatten_node_signal(delta_x_hat_t_1[..., 0], self.signal_dim),
-            _flatten_node_signal(delta_x_wave_t_1[..., 0], self.signal_dim),
+            delta_x_hat_t_1,
+            delta_x_wave_t_1,
         ], dim=-1)
         delta_y_t_i = _flatten_measurement(delta_y_t_i, self.measurement_dim)
         delta_y_innov_i = _flatten_measurement(delta_y_innov_i, self.measurement_dim)
         y_innov_features = torch.cat([delta_y_innov_i, h_mat_i.float()], dim=-1)
 
-        return delta_y_t_i, edge_features, x_features, y_innov_features
+        return delta_y_t_i, edge_features, x_features, y_innov_features, delta_x_hat_t_1
 
     def calculate_h_mat_features(self, h_mat, edge_index, node_number):
         h_mat_edges = calculate_edge_features(h_mat, edge_index, node_number)[..., 0]
@@ -353,21 +362,36 @@ class GraphKalmanFilter(torch.nn.Module):
         h_mat_i = h_mat_i.reshape(-1, self.signal_dim * self.measurement_dim)
         return h_mat_i, h_mat_edges
 
-    def _build_adaptive_features(self, delta_y_innov_i: Tensor, delta_y_t_i: Tensor, h_mat_i: Tensor) -> Tensor:
+    def _build_adaptive_features(
+        self,
+        delta_y_innov_i: Tensor,
+        delta_y_t_i: Tensor,
+        h_mat_i: Tensor,
+        x_hat: Tensor,
+        delta_x_hat_t_1: Tensor,
+    ) -> Tensor:
         feature_map = {
             "delta_y_innov": _flatten_measurement(delta_y_innov_i, self.measurement_dim),
             "delta_y": _flatten_measurement(delta_y_t_i, self.measurement_dim),
             "h_mat_i": h_mat_i.float(),
+            "x_hat": _flatten_node_signal(x_hat, self.signal_dim),
+            "delta_x_hat_t_1": _flatten_node_signal(delta_x_hat_t_1, self.signal_dim),
         }
         return torch.cat([feature_map[name] for name in ADAPTIVE_CONSENSUS_FEATURES], dim=-1)
 
     def _apply_consensus(self, phi_pred_t_t: Tensor, edge_index, delta_y_innov_i: Tensor,
-                         delta_y_t_i: Tensor, h_mat_i: Tensor) -> Tensor:
+                         delta_y_t_i: Tensor, h_mat_i: Tensor, delta_x_hat_t_1: Tensor) -> Tensor:
         phi_pred_t_t = phi_pred_t_t.reshape(-1, self.signal_dim, 1)
         if self.gcn is None:
             return phi_pred_t_t
         if isinstance(self.gcn, AdaptiveMeanConv):
-            adaptive_features = self._build_adaptive_features(delta_y_innov_i, delta_y_t_i, h_mat_i)
+            adaptive_features = self._build_adaptive_features(
+                delta_y_innov_i,
+                delta_y_t_i,
+                h_mat_i,
+                phi_pred_t_t[..., 0],
+                delta_x_hat_t_1,
+            )
             return self.gcn(phi_pred_t_t[..., 0], edge_index, adaptive_features)
         return self.gcn(phi_pred_t_t[..., 0], edge_index)
 
