@@ -17,7 +17,7 @@ import torch
 import pytorch_lightning as pl
 from torch_geometric.loader import DataLoader
 
-from experiments.graphkalmanprocess_hparams import PRESETS, SWEEPS
+from experiments.graphkalmanprocess_hparams import LOCALIZATION_BASELINE, PRESETS, SWEEPS
 from utils.reproducibility import seed_everything
 from utils.DistributedKalmanData import (
     CreateGraph,
@@ -28,6 +28,13 @@ from utils.DistributedKalmanData import (
     HSystemLinear,
 )
 from utils.DistributedKalmanNet import GraphKalmanProcess, loss_function
+from utils.LocalizationScenario import (
+    dkn_model_path,
+    gnn_rnn_model_path,
+    normalize_localization_config,
+    normalize_localization_train_models,
+    run_localization_experiment,
+)
 
 
 def parse_scalar(value: str) -> Any:
@@ -426,6 +433,7 @@ def evaluate_on_graph(*, model: GraphKalmanProcess, cfg: dict, eval_cfg: dict) -
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train/sweep GraphKalmanProcess with simple hyperparam grids.")
+    parser.add_argument("--localization", action="store_true", help="Run the localization DKN/GNN-RNN workflow.")
     parser.add_argument("--preset", default="baseline", choices=sorted(PRESETS.keys()))
     parser.add_argument(
         "--override",
@@ -442,6 +450,7 @@ def main() -> None:
     parser.add_argument("--sweep", choices=sorted(SWEEPS.keys()), help="Run a named sweep from graphkalmanprocess_hparams.py.")
     parser.add_argument("--run-name", default=None, help="Single-run name; defaults to timestamp.")
     parser.add_argument("--root-dir", default=".", help="Project root directory (default: current).")
+    parser.add_argument("--description", default=None, help="Experiment description for localization runs.")
     parser.add_argument("--dry-run", action="store_true", help="Print planned runs without training.")
     parser.add_argument("--r-scales", default=None, help="Comma-separated sweep over data.r_scale (e.g. 0.5,1,2).")
     parser.add_argument("--q-values", default=None, help="Comma-separated sweep over data.q (e.g. 0.1,1,10).")
@@ -462,6 +471,44 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    root_dir = Path(args.root_dir).resolve()
+
+    if args.localization:
+        config_val = deepcopy(LOCALIZATION_BASELINE)
+        for ov in args.override:
+            if "=" not in ov:
+                raise ValueError(f"Invalid --override {ov!r}; expected key=value")
+            k, v = ov.split("=", 1)
+            set_by_dotted_key(config_val, k.strip(), parse_scalar(v))
+        config_val = normalize_localization_config(config_val)
+
+        if args.dump_config:
+            print(json.dumps(config_val, indent=2, sort_keys=True))
+            return
+
+        if args.dry_run:
+            dt_values = config_val.get("dt_mismatch_values", [1.0]) if config_val.get("use_dt_mismatch", False) else [1.0]
+            print("Planned localization runs:")
+            for r_noise in config_val["measurement_noise_values"]:
+                if "gnn_rnn" in normalize_localization_train_models(config_val):
+                    path = gnn_rnn_model_path(Path("<experiment>"), r_noise, config=config_val, for_save=True)
+                    print(f"  - {path.parent.name}/{path.name}")
+                if "dkn" in normalize_localization_train_models(config_val):
+                    for dt_mismatch in dt_values:
+                        path = dkn_model_path(
+                            Path("<experiment>"),
+                            r_noise,
+                            use_dt_mismatch=config_val.get("use_dt_mismatch", False),
+                            dt_ratio=dt_mismatch,
+                            config=config_val,
+                            for_save=True,
+                        )
+                        print(f"  - {path.parent.name}/{path.name}")
+            return
+
+        run_localization_experiment(config_val, root_dir=root_dir, description=args.description)
+        return
+
     base_cfg = deepcopy(PRESETS[args.preset])
     for ov in args.override:
         if "=" not in ov:
@@ -469,7 +516,6 @@ def main() -> None:
         k, v = ov.split("=", 1)
         set_by_dotted_key(base_cfg, k.strip(), parse_scalar(v))
 
-    root_dir = Path(args.root_dir).resolve()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if args.dump_config:
