@@ -1,0 +1,4 @@
+interface:
+  display_name: "Train Compare Baseline"
+  short_description: "Train and compare Kalman experiment results"
+  default_prompt: "Use $train-compare-baseline to train a given distributedKNET setup and generate a baseline comparison graph."
