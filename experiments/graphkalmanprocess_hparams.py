@@ -5,6 +5,7 @@ Edit this file to add new presets or sweeps you want to compare.
 
 from __future__ import annotations
 
+import math
 from copy import deepcopy
 
 
@@ -45,7 +46,7 @@ BASELINE: dict = {
         "lr": 5e-5,
         "learn_edge_kalman": False,
         # Diffusion/consensus step at the end of GraphKalmanFilter:
-        # "none" (default), "simple" (SimpleConv), "gcn" (GCNConv).
+        # "none" (default), "simple" (SimpleConv), "gcn" (GCNConv), "adaptive".
         "consensus_layer": "simple",
         "x0_scale": 1.0,
     },
@@ -75,6 +76,7 @@ def _with(base: dict, updates: dict) -> dict:
             cfg[k] = v
     return cfg
 
+# Localization baseline experiment. Change only in your local copy.
 LOCALIZATION_BASELINE: dict = _with(BASELINE, {
     "seed": 42,
     "save_root": "my_models",
@@ -93,8 +95,12 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
     },
     "data": {
         "time_steps": 20,
-        "q": 1.0,
-        "measurement_noise_values": [1],
+        "mu": 1,  # q**2 / r_scale**2
+        "rho": (1.0 / math.radians(10.0)) ** 2,
+        "r_scale": [1.0],
+        # q           = r_scale * math.sqrt(mu)
+        # sigma_r     = r_scale
+        # sigma_theta = r_scale / math.sqrt(rho)
         "train_sims": 20_000,
         "val_sims": 256,
         "batch_size": 64,
@@ -107,12 +113,13 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
         "node_kalman_dim": 16,
         "edge_kalman_dim": 2,
         "hidden_dim": 128,
-        "lr": 1e-3,
+        "lr": 1e-4,
         "learn_edge_kalman": True,
-        "train_models": ["dkn"],
+        "train_models": ["dkn", "gnn-rnn"],
         "gnn_rnn_hidden_dim": 128,
-        "gnn_rnn_learning_rate": 1e-3,
-        "consensus_layer": "none",
+        "gnn_rnn_learning_rate": 1e-4,
+        "consensus_layer": "adaptive",
+        "position_only_loss": True,
     },
     "trainer": {
         "max_epochs": 100,

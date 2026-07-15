@@ -28,7 +28,7 @@ from utils.DistributedKalmanData import (
     HSystemLinear,
 )
 from utils.DistributedKalmanNet import GraphKalmanProcess, loss_function
-from utils.LocalizationScenario import (
+from experiments.localization_experiment import (
     dkn_model_path,
     gnn_rnn_model_path,
     normalize_localization_config,
@@ -208,6 +208,7 @@ def run_one_experiment(cfg: dict, *, run_name: str, root_dir: Path) -> RunResult
         learn_edge_kalman=bool(model_cfg["learn_edge_kalman"]),
         x0_scale=float(model_cfg.get("x0_scale", x0_scale)),
         consensus_layer=model_cfg.get("consensus_layer", "none"),
+        position_only_loss=bool(model_cfg.get("position_only_loss", False)),
     ).to(torch.float)
 
     curriculum_cfg = cfg.get("curriculum", {})
@@ -425,7 +426,8 @@ def evaluate_on_graph(*, model: GraphKalmanProcess, cfg: dict, eval_cfg: dict) -
             batch = batch.to(device)
             x_true = batch.y.reshape(batch.num_graphs, -1, model.signal_dim, 1)
             x_pred = model(batch).to(device=x_true.device)
-            loss = loss_function(x_pred, x_true)
+            position_indices = [0, 2] if model.position_only_loss else None
+            loss = loss_function(x_pred, x_true, position_indices=position_indices)
             total += float(loss.item()) * int(batch.num_graphs)
             count += int(batch.num_graphs)
     return total / max(count, 1)
@@ -489,7 +491,7 @@ def main() -> None:
         if args.dry_run:
             dt_values = config_val.get("dt_mismatch_values", [1.0]) if config_val.get("use_dt_mismatch", False) else [1.0]
             print("Planned localization runs:")
-            for r_noise in config_val["measurement_noise_values"]:
+            for r_noise in config_val["r_scale"]:
                 if "gnn_rnn" in normalize_localization_train_models(config_val):
                     path = gnn_rnn_model_path(Path("<experiment>"), r_noise, config=config_val, for_save=True)
                     print(f"  - {path.parent.name}/{path.name}")

@@ -74,6 +74,7 @@ def build_model(cfg: dict) -> GraphKalmanProcess:
         learn_edge_kalman=bool(model_cfg["learn_edge_kalman"]),
         x0_scale=float(model_cfg.get("x0_scale", data_cfg["x0_scale"])),
         consensus_layer=model_cfg.get("consensus_layer", "none"),
+        position_only_loss=bool(model_cfg.get("position_only_loss", False)),
     ).to(torch.float)
 
 

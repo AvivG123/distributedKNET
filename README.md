@@ -4,19 +4,19 @@ Distributed Kalman filtering and KalmanNet-style graph models for the thesis cod
 
 This repository contains the implementation used to train, evaluate, and compare:
 
-<<<<<<< HEAD
 - a classical diffusion EKF baseline
 - `GraphKalmanProcess` / Distributed KalmanNet
 - a GNN-RNN baseline
-=======
+
 Constant-velocity DKN/GNN-RNN workflow:
-- `python -m experiments.run_graphkalmanprocess --localization`
-- Skip the prompt: `python -m experiments.run_graphkalmanprocess --localization --description "baseline run"`
+
+- `python3 -m experiments.run_graphkalmanprocess --localization`
+- Skip the prompt: `python3 -m experiments.run_graphkalmanprocess --localization --description "baseline run"`
 
 Single run:
-- `python -m experiments.run_graphkalmanprocess --preset baseline`
-- Override any value with dotted keys: `python -m experiments.run_graphkalmanprocess --preset baseline --override model.hidden_dim=128 --override model.lr=1e-4`
->>>>>>> main
+
+- `python3 -m experiments.run_graphkalmanprocess --preset baseline`
+- Override any value with dotted keys: `python3 -m experiments.run_graphkalmanprocess --preset baseline --override model.hidden_dim=128 --override model.lr=1e-4`
 
 The code supports both nonlinear and linear system variants, with matched and mismatched process models.
 
@@ -53,7 +53,7 @@ Clone the repository and create a virtual environment, then install the project 
 Typical setup:
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 .venv\Scripts\activate
 pip install -U pip
 pip install torch pytorch-lightning torch-geometric numpy matplotlib tqdm
@@ -66,7 +66,7 @@ Depending on your platform, PyTorch Geometric may require the installation seque
 The main experiment entry point is:
 
 ```bash
-python -m experiments.run_graphkalmanprocess --preset baseline
+python3 -m experiments.run_graphkalmanprocess --preset baseline
 ```
 
 The runner supports single runs, sweeps, and evaluation on a fresh graph dataset.
@@ -76,43 +76,43 @@ Common options:
 - override a config value:
 
 ```bash
-python -m experiments.run_graphkalmanprocess --preset baseline --override model.hidden_dim=128 --override model.lr=1e-4
+python3 -m experiments.run_graphkalmanprocess --preset baseline --override model.hidden_dim=128 --override model.lr=1e-4
 ```
 
 - run a named sweep:
 
 ```bash
-python -m experiments.run_graphkalmanprocess --preset baseline --sweep hidden_dim_x_lr
+python3 -m experiments.run_graphkalmanprocess --preset baseline --sweep hidden_dim_x_lr
 ```
 
 - run a cartesian grid:
 
 ```bash
-python -m experiments.run_graphkalmanprocess --preset baseline --grid model.hidden_dim=32,64,128 --grid model.lr=1e-4,3e-5
+python3 -m experiments.run_graphkalmanprocess --preset baseline --grid model.hidden_dim=32,64,128 --grid model.lr=1e-4,3e-5
 ```
 
 - sweep measurement noise:
 
 ```bash
-python -m experiments.run_graphkalmanprocess --preset baseline --r-scales 0.5,1,2
+python3 -m experiments.run_graphkalmanprocess --preset baseline --r-scales 0.5,1,2
 ```
 
 - sweep process noise and measurement noise:
 
 ```bash
-python -m experiments.run_graphkalmanprocess --preset baseline --q-values 0.1,1 --r-scales 0.5,1,2
+python3 -m experiments.run_graphkalmanprocess --preset baseline --q-values 0.1,1 --r-scales 0.5,1,2
 ```
 
 - compare matched and mismatched dynamics:
 
 ```bash
-python -m experiments.run_graphkalmanprocess --preset baseline --r-scales 0.5,1,2 --with-without-mismatch --mismatch-angle-deg 20
+python3 -m experiments.run_graphkalmanprocess --preset baseline --r-scales 0.5,1,2 --with-without-mismatch --mismatch-angle-deg 20
 ```
 
 - evaluate the best checkpoint after training:
 
 ```bash
-python -m experiments.run_graphkalmanprocess --preset baseline --eval --eval-sims 1024
+python3 -m experiments.run_graphkalmanprocess --preset baseline --eval --eval-sims 1024
 ```
 
 Results are written to `experiments/results/*.csv`, and Lightning logs are written to `lightning_logs/`.

@@ -79,7 +79,7 @@ class GnnRnnLightning(pl.LightningModule):
         x_pred = x_pred.permute(0, 2, 1, 3).unsqueeze(-1)
 
         loss = loss_function(x_pred, x_true)
-        self.log(f'{mode}_loss:', loss, batch_size=len(batch), on_step=True, on_epoch=True, prog_bar=True)
+        self.log(f'{mode}_loss', loss, batch_size=len(batch), on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
     def training_step(self, batch, batch_idx):

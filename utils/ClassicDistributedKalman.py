@@ -1,6 +1,26 @@
 import numpy as np
 
 
+def _process_covariance(q, q_matrix, state_dim):
+    if q_matrix is None:
+        return float(q) ** 2 * np.eye(state_dim)
+    covariance = np.asarray(q_matrix, dtype=float)
+    if covariance.shape != (state_dim, state_dim):
+        raise ValueError(
+            f"q_matrix must have shape ({state_dim}, {state_dim}); got {covariance.shape}."
+        )
+    return covariance
+
+
+def _posterior_covariance(prior_covariance, measurement_information):
+    """Return (P^-1 + S)^-1 without requiring an invertible prior P."""
+    prior = np.asarray(prior_covariance, dtype=float)
+    information = np.asarray(measurement_information, dtype=float)
+    identity = np.eye(prior.shape[0], dtype=float)
+    posterior = np.linalg.solve(identity + prior @ information, prior)
+    return 0.5 * (posterior + posterior.T)
+
+
 def edge_kalman_gain(h_system, r_array, j_matrix, x_pred, measurements):
     H_T = h_system.jacobian(x_pred, 1)[:, 0, ...]
     r_inv = 1 / (r_array ** 2)
@@ -13,13 +33,15 @@ def edge_kalman_gain(h_system, r_array, j_matrix, x_pred, measurements):
 
 
 def centralized_extended_kalman_filter(measurements, f_system, h_system, r_array, q, p0, x0,
-                                       time_steps, node_num):
+                                       time_steps, node_num, q_matrix=None):
     state_dim = x0.shape[0]
+    process_covariance = _process_covariance(q, q_matrix, state_dim)
     x_hat = np.zeros((time_steps, state_dim, 1))
     measurements = measurements.transpose(2, 0, 1)
     r_inv = 1 / (r_array ** 2)
-    p = p0
-    x_pred = x0
+    F = f_system.jacobian(x0[None, ..., 0])[0, ...]
+    p = F @ p0 @ F.T + node_num * process_covariance
+    x_pred = f_system(x0)
     for i in range(measurements.shape[0]):
         H_T = h_system.jacobian(x_pred[None, ...], 1)[0, 0, ...]
         H = H_T.transpose((0, 2, 1))
@@ -28,28 +50,32 @@ def centralized_extended_kalman_filter(measurements, f_system, h_system, r_array
         y_pred = H_T @ r_inv[:, None, None] @ h_system(x_pred[None, ...], 1)
         s_all = np.sum(node_s, axis=0) / node_num
         y_all_delta = np.sum(y_node - y_pred, axis=0) / node_num
-        M = np.linalg.inv(np.linalg.inv(p) + s_all)
+        M = _posterior_covariance(p, s_all)
         x_current = x_pred + M @ y_all_delta
         F = f_system.jacobian(x_current[None, ..., 0])[0, ...]
-        p = F @ M @ F.T + node_num * q ** 2 * np.eye(state_dim)
+        p = F @ M @ F.T + node_num * process_covariance
         x_pred = f_system(x_current)
         x_hat[i, ...] = x_current
     return x_hat
 
 
 def diffusion_extended_kalman_filter(measurements, f_system, h_system, r_array, q, p0, x0, j_matrix,
-                                     time_steps, node_num):
+                                     time_steps, node_num, q_matrix=None):
     state_dim = x0.shape[0]
+    process_covariance = _process_covariance(q, q_matrix, state_dim)
     x_hat = np.zeros((time_steps, node_num, state_dim, 1))
     r_inv = 1 / (r_array ** 2)
     measurements = measurements.transpose(2, 0, 1)
-    p = p0[None, ...].repeat(node_num, axis=0)
-    x_pred = x0
+    x_pred = np.repeat(x0[None, ...], node_num, axis=0)
+    F = f_system.jacobian(x_pred[..., 0])
+    p = (
+        F @ np.repeat(p0[None, ...], node_num, axis=0) @ F.transpose((0, 2, 1))
+        + j_matrix.sum(axis=0)[..., None, None] * process_covariance
+    )
+    x_pred = f_system(x_pred)
     for i in range(measurements.shape[0]):
         x_current_list = []
         m_list = []
-        if i == 0:
-            x_pred = x_pred[None, ...].repeat(node_num, axis=0)
         H_T = h_system.jacobian(x_pred, 1)[:, 0, ...]
         H = H_T.transpose((0, 1, 3, 2))
         for j in range(node_num):
@@ -61,7 +87,7 @@ def diffusion_extended_kalman_filter(measurements, f_system, h_system, r_array, 
             y_pred_j = H_T_j @ r_inv[:, None, None] @ h_system.func(x_pred_j, 1)
             s_local_j = (j_matrix[:, j, None, None] * node_s).sum(0) / j_matrix[:, j].sum()
             y_local_delta_j = (j_matrix[:, j, None, None] * (y_node_j - y_pred_j)).sum(0) / j_matrix[:, j].sum()
-            M_j = np.linalg.inv(np.linalg.inv(p[j, ...]) + s_local_j)
+            M_j = _posterior_covariance(p[j, ...], s_local_j)
             x_current_j = (x_pred_j + M_j @ y_local_delta_j)[0, ...]
             x_current_list.append(x_current_j)
             m_list.append(M_j)
@@ -69,25 +95,32 @@ def diffusion_extended_kalman_filter(measurements, f_system, h_system, r_array, 
         M_all = np.stack(m_list, axis=0)
         x_current = np.einsum('ij, jmk -> imk', j_matrix, x_current_all) / j_matrix.sum(axis=0)[..., None, None]
         F = f_system.jacobian(x_current[..., 0])
-        p = F @ M_all @ F.transpose((0, 2, 1)) + j_matrix.sum(axis=0)[..., None, None] * q ** 2 * np.eye(state_dim)
+        p = (
+            F @ M_all @ F.transpose((0, 2, 1))
+            + j_matrix.sum(axis=0)[..., None, None] * process_covariance
+        )
         x_pred = f_system(x_current)
         x_hat[i, ...] = x_current
     return x_hat
 
 
 def diffusion_extended_kalman_filter_parallel_edge(measurements, f_system, h_system, r_array, q, p0, x0, j_matrix,
-                                                   time_steps, node_num):
+                                                   time_steps, node_num, q_matrix=None):
     state_dim = x0.shape[0]
+    process_covariance = _process_covariance(q, q_matrix, state_dim)
     x_hat = np.zeros((time_steps, node_num, state_dim, 1))
     r_inv = 1 / (r_array ** 2)
     measurements = measurements.transpose(2, 0, 1)
-    p = p0[None, ...].repeat(node_num, axis=0)
-    x_pred = x0
+    x_pred = np.repeat(x0[None, ...], node_num, axis=0)
+    F = f_system.jacobian(x_pred[..., 0])
+    p = (
+        F @ np.repeat(p0[None, ...], node_num, axis=0) @ F.transpose((0, 2, 1))
+        + j_matrix.sum(axis=0)[..., None, None] * process_covariance
+    )
+    x_pred = f_system(x_pred)
     for i in range(measurements.shape[0]):
         x_current_list = []
         m_list = []
-        if i == 0:
-            x_pred = x_pred[None, ...].repeat(node_num, axis=0)
         H_T = h_system.jacobian(x_pred, 1)[:, 0, ...]
         H = H_T.transpose((0, 1, 3, 2))
         y_kalman_edge = edge_kalman_gain(h_system, r_array, j_matrix, x_pred, measurements[i, ...])
@@ -98,7 +131,7 @@ def diffusion_extended_kalman_filter_parallel_edge(measurements, f_system, h_sys
             node_s = H_T_j @ r_inv[:, None, None] @ H_j
             s_local_j = (j_matrix[:, j, None, None] * node_s).sum(0) / j_matrix[:, j].sum()
             y_local_delta_j = y_kalman_edge[j, ...]
-            M_j = np.linalg.inv(np.linalg.inv(p[j, ...]) + s_local_j)
+            M_j = _posterior_covariance(p[j, ...], s_local_j)
             x_current_j = (x_pred_j + M_j @ y_local_delta_j)[0, ...]
             x_current_list.append(x_current_j)
             m_list.append(M_j)
@@ -106,26 +139,33 @@ def diffusion_extended_kalman_filter_parallel_edge(measurements, f_system, h_sys
         M_all = np.stack(m_list, axis=0)
         x_current = np.einsum('ij, jmk -> imk', j_matrix, x_current_all) / j_matrix.sum(axis=0)[..., None, None]
         F = f_system.jacobian(x_current[..., 0])
-        p = F @ M_all @ F.transpose((0, 2, 1)) + j_matrix.sum(axis=0)[..., None, None] * q ** 2 * np.eye(state_dim)
+        p = (
+            F @ M_all @ F.transpose((0, 2, 1))
+            + j_matrix.sum(axis=0)[..., None, None] * process_covariance
+        )
         x_pred = f_system(x_current)
         x_hat[i, ...] = x_current
     return x_hat
 
 
 def local_extended_kalman_filter(measurements, f_system, h_system, r_array, q, p0, x0, j_matrix,
-                                 time_steps, node_num):
+                                 time_steps, node_num, q_matrix=None):
     state_dim = x0.shape[0]
+    process_covariance = _process_covariance(q, q_matrix, state_dim)
     x_hat = np.zeros((time_steps, node_num, state_dim, 1))
     r_inv = 1 / (r_array ** 2)
     measurements = measurements.transpose(2, 0, 1)
-    p = p0
-    x_pred = x0
+    x_pred = np.repeat(x0[None, ...], node_num, axis=0)
+    F = f_system.jacobian(x_pred[..., 0])
+    p = (
+        F @ np.repeat(p0[None, ...], node_num, axis=0) @ F.transpose((0, 2, 1))
+        + j_matrix.sum(axis=0)[..., None, None] * process_covariance
+    )
+    x_pred = f_system(x_pred)
     for i in range(measurements.shape[0]):
         x_current_list = []
         m_list = []
-        if i == 0:
-            x_pred = x_pred[None, ...].repeat(node_num, axis=0)
-        h_transpose = h_system.jacobian(x_pred, 1)
+        h_transpose = h_system.jacobian(x_pred, 1)[:, 0, ...]
         H = h_transpose.transpose((0, 1, 3, 2))
         for j in range(node_num):
             x_pred_j = x_pred[j, ...][None, ...]
@@ -136,14 +176,17 @@ def local_extended_kalman_filter(measurements, f_system, h_system, r_array, q, p
             y_pred_j = H_T_j @ r_inv[:, None, None] @ h_system(x_pred_j, 1)
             s_local_j = (j_matrix[:, j, None, None] * node_s).sum(0) / j_matrix[:, j].sum()
             y_local_delta_j = (j_matrix[:, j, None, None] * (y_node_j - y_pred_j)).sum(0) / j_matrix[:, j].sum()
-            M_j = np.linalg.inv(np.linalg.inv(p[j, ...]) + s_local_j)
+            M_j = _posterior_covariance(p[j, ...], s_local_j)
             x_current_j = (x_pred_j + M_j @ y_local_delta_j)[0, ...]
             x_current_list.append(x_current_j)
             m_list.append(M_j)
         x_current_all = np.stack(x_current_list, axis=0)
         M_all = np.stack(m_list, axis=0)
         F = f_system.jacobian(x_current_all[..., 0])
-        p = F @ M_all @ F.transpose((0, 2, 1)) + j_matrix.sum(axis=0)[..., None, None] * q ** 2 * np.eye(state_dim)
+        p = (
+            F @ M_all @ F.transpose((0, 2, 1))
+            + j_matrix.sum(axis=0)[..., None, None] * process_covariance
+        )
         x_pred = f_system(x_current_all)
         x_hat[i, ...] = x_current_all
     return x_hat

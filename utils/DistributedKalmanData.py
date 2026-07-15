@@ -32,6 +32,43 @@ def _randn(shape: tuple[int, ...], *, seed: int | None) -> np.ndarray:
     return np.random.RandomState(int(seed)).randn(*shape)
 
 
+def _stream_seed(seed: int | None, stream: int) -> int | None:
+    if seed is None:
+        return None
+    sequence = np.random.SeedSequence([int(seed), int(stream)])
+    return int(sequence.generate_state(1, dtype=np.uint32)[0])
+
+
+def _covariance_square_root(covariance: np.ndarray, *, name: str) -> np.ndarray:
+    covariance = np.asarray(covariance, dtype=np.float64)
+    if not np.all(np.isfinite(covariance)):
+        raise ValueError(f"{name} must contain only finite values.")
+    if not np.allclose(covariance, covariance.T, atol=1e-8):
+        raise ValueError(f"{name} must be symmetric.")
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    if eigenvalues.min(initial=0.0) < -1e-8:
+        raise ValueError(f"{name} must be positive semidefinite.")
+    return (eigenvectors * np.sqrt(np.clip(eigenvalues, 0.0, None))) @ eigenvectors.T
+
+
+def _process_noise(q, shape: tuple[int, ...], *, seed: int | None) -> np.ndarray:
+    """Sample process noise; matrices are interpreted as covariances."""
+
+    standard_noise = _randn(shape, seed=seed)
+    if np.isscalar(q):
+        return float(q) * standard_noise
+
+    q_array = np.asarray(q, dtype=np.float64)
+    state_dim = shape[-3]
+    if q_array.shape == (state_dim, state_dim):
+        square_root = _covariance_square_root(q_array, name="process covariance")
+        return np.einsum("ij,...jkt->...ikt", square_root, standard_noise)
+    raise ValueError(
+        f"q must be a scalar or shape ({state_dim}, {state_dim}); "
+        f"got {q_array.shape}."
+    )
+
+
 def build_bidirectional_edge_index(graph: nx.Graph) -> torch.Tensor:
     """Build a directed PyG edge_index from an undirected NetworkX graph."""
 
@@ -48,7 +85,7 @@ def build_bidirectional_edge_index(graph: nx.Graph) -> torch.Tensor:
 
 def generate_data_points(
     f: Any,
-    q: float,
+    q,
     x0: np.ndarray,
     time_steps: int,
     *,
@@ -61,7 +98,7 @@ def generate_data_points(
     """
 
     noise_shape = x0.shape + (time_steps,)
-    w = q * _randn(noise_shape, seed=seed)
+    w = _process_noise(q, noise_shape, seed=seed)
     data_points = np.zeros(shape=noise_shape, dtype=np.float32)
     x = x0
     for t in range(time_steps):
@@ -232,7 +269,8 @@ class HSystemLinear:
 class GraphDataset(Dataset):
     def __init__(
             self, g, f_system, h_system, q, r_array, monte_carlo_simulations=1000,
-            time_steps=100, n_expansions=0, x0=10, state_dim=2, *, seed: int | None = 42
+            time_steps=100, n_expansions=0, x0=10, state_dim=2, *,
+            p0=None, seed: int | None = 42
     ):
         super(GraphDataset, self).__init__()
         self.state_dim = state_dim
@@ -246,35 +284,41 @@ class GraphDataset(Dataset):
         self.r_array = np.asarray(r_array, dtype=np.float32)
         self.monte_carlo_simulations = monte_carlo_simulations
         self.time_steps = time_steps
-        self.seed = seed
-        self.x0 = self._build_initial_state_batch(x0)
-        self.data_points = generate_data_points(f_system, q, self.x0, self.time_steps, seed=seed)
-        self.measurements = self.generate_measurements(h_system, n_expansions, seed=seed)
+        self.seed = _stream_seed(seed, 0)
+        self.x0 = self._build_initial_state_batch(x0, p0)
+        self.data_points = generate_data_points(
+            f_system, q, self.x0, self.time_steps, seed=_stream_seed(seed, 1)
+        )
+        self.measurements = self.generate_measurements(
+            h_system, n_expansions, seed=_stream_seed(seed, 2)
+        )
         self.h_system = h_system
         self._edge_index = g.edge_index if hasattr(g, "edge_index") else build_bidirectional_edge_index(self.nx_graph)
         self._adj_matrix = torch.tensor(np.asarray(self.adj_matrix), dtype=torch.float)
 
-    def _build_initial_state_batch(self, x0):
-        noise = _randn(
-            (self.monte_carlo_simulations, self.state_dim, 1),
-            seed=self.seed,
-        ).astype(np.float32)
+    def _build_initial_state_batch(self, x0, p0):
+        x0_array = np.asarray(x0, dtype=np.float32)
+        expected_batch_shape = (self.monte_carlo_simulations, self.state_dim, 1)
+        if x0_array.shape == expected_batch_shape:
+            return x0_array
 
         if np.isscalar(x0):
-            base_state = np.full((self.state_dim, 1), x0, dtype=np.float32)
-            return base_state[None, ...] + noise
-
-        x0_array = np.asarray(x0, dtype=np.float32)
+            x0_array = np.full((self.state_dim, 1), x0, dtype=np.float32)
 
         if x0_array.shape == (self.state_dim,):
             x0_array = x0_array[:, None]
 
         if x0_array.shape == (self.state_dim, 1):
+            if p0 is None:
+                covariance = np.eye(self.state_dim)
+            elif np.isscalar(p0):
+                covariance = float(p0) * np.eye(self.state_dim)
+            else:
+                raise ValueError(f"p0 must be a scalar; got shape {np.shape(p0)}.")
+            square_root = _covariance_square_root(covariance, name="p0")
+            standard_noise = _randn(expected_batch_shape, seed=self.seed)
+            noise = np.einsum("ij,bjk->bik", square_root, standard_noise).astype(np.float32)
             return x0_array[None, ...] + noise
-
-        expected_batch_shape = (self.monte_carlo_simulations, self.state_dim, 1)
-        if x0_array.shape == expected_batch_shape:
-            return x0_array
 
         raise ValueError(
             f"x0 must be a scalar, shape ({self.state_dim},), "
@@ -294,7 +338,12 @@ class GraphDataset(Dataset):
         if self.r_array.ndim == 0:
             r_scale = np.full(node_count, float(self.r_array), dtype=np.float32)
         else:
-            r_scale = self.r_array
+            r_scale = self.r_array.reshape(-1)
+            if r_scale.shape != (node_count,):
+                raise ValueError(
+                    f"r_array must be scalar or have one value per node ({node_count}); "
+                    f"got shape {self.r_array.shape}."
+                )
 
         measurement_noise = _randn(
             (self.monte_carlo_simulations, node_count, self.time_steps, 1),

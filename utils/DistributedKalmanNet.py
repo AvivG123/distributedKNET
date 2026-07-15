@@ -26,12 +26,33 @@ def maybe_wrap_innovation(h_system, residual, sensor_axis):
     return residual
 
 
-def loss_function(x_pred: torch.Tensor, x_true: torch.Tensor) -> torch.Tensor:
+def loss_function_position_only(
+    x_pred: torch.Tensor,
+    x_true: torch.Tensor,
+    position_indices,
+) -> torch.Tensor:
+    indices = torch.as_tensor(position_indices, dtype=torch.long, device=x_pred.device)
+    x_pred = torch.index_select(x_pred, dim=-2, index=indices)
+    x_true = torch.index_select(x_true, dim=-2, index=indices.to(x_true.device))
+    diff_x = x_pred - x_true[..., None, :, :]
+    squared_norm = torch.sum(diff_x.float() ** 2, dim=(-1, -2))
+    # Smooth the position-only norm at zero, then remove the metric offset.
+    return (torch.sqrt(squared_norm + 1e-12) - 1e-6).mean()
+
+
+def loss_function(
+    x_pred: torch.Tensor,
+    x_true: torch.Tensor,
+    position_indices=None,
+) -> torch.Tensor:
     """Compute batched L2 norm loss between predictions and truth.
 
     Shapes expected: x_pred (B, T, N, D, 1), x_true (B, T, N, D, 1) or
     compatible broadcastable shapes used by the project.
     """
+    if position_indices is not None:
+        return loss_function_position_only(x_pred, x_true, position_indices)
+
     diff_x = x_pred - x_true[..., None, :, :]
     loss = torch.sqrt(torch.sum(diff_x ** 2, dim=(-1, -2))).mean()
     # loss = torch.linalg.norm(diff_x, ord=2, dim=(-1, -2)).mean()
@@ -65,15 +86,23 @@ class DataCharacteristics:
 
 class EdgeKalmanFilter:
     def __init__(self, r_array, signal_dim, measurement_dim=1):
-        # keep r_inv as a torch tensor for device-safe use
-        self.r_inv = torch.as_tensor(1 / (r_array ** 2), dtype=torch.float)
+        r_tensor = torch.as_tensor(r_array, dtype=torch.float)
+        self.has_per_node_noise = r_tensor.ndim > 0
+        self.r_inv = 1 / (r_tensor ** 2)
         self.signal_dim = signal_dim
         self.measurement_dim = measurement_dim
 
     def __call__(self, x_pred, measurements, h_system, adj_matrix, node_number):
         device = x_pred.device
         dtype = x_pred.dtype
-        r_inv = self.r_inv.to(device=device).repeat(node_number)
+        r_inv = self.r_inv.to(device=device).reshape(-1)
+        if r_inv.numel() == 1:
+            r_inv = r_inv.expand(node_number)
+        elif r_inv.numel() != node_number:
+            raise ValueError(
+                f"r_array must be scalar or have one value per node ({node_number}); "
+                f"got {r_inv.numel()} values."
+            )
         adj_matrix_reshaped = adj_matrix.to(device=device).reshape(-1, node_number, node_number)
         measurements = measurements.to(device=device).reshape(-1, node_number, self.measurement_dim, 1)
         h_transpose_mat = self.calculate_h_mat(h_system, node_number, x_pred)
@@ -86,8 +115,9 @@ class EdgeKalmanFilter:
 
         measurement_residual = maybe_wrap_innovation(h_system, measurement_residual, sensor_axis=2)
         y_diff = h_transpose_mat @ r_inv[None, None, :, None, None].float() @ measurement_residual
-        y_local_delta_unnorm = (adj_matrix_reshaped[..., None, None] * y_diff).sum(2)
-        y_local_delta = y_local_delta_unnorm / adj_matrix_reshaped.sum(1)[..., None, None]
+        adjacency_weights = adj_matrix_reshaped[..., None, None]
+        y_local = (adjacency_weights * y_diff).sum(2)
+        y_local_delta = y_local / adj_matrix_reshaped.sum(1)[..., None, None]
         return y_local_delta, h_transpose_mat
 
     def calculate_h_mat(self, h_system, node_number, x_pred) -> torch.Tensor:
@@ -344,6 +374,10 @@ class GraphKalmanFilter(torch.nn.Module):
             cross_kalman = self.cross_kalman_gain(
                 r_gru_output, edge_index, h_mat_edge=h_mat_edges, delta_y=edge_features)
             cross_kalman_reshaped = cross_kalman.reshape(-1, node_number, self.signal_dim, 1)
+            if self.edge_kalman.has_per_node_noise:
+                cross_kalman_reshaped = (
+                    cross_kalman_reshaped + edge_kalman_filter_summed
+                )
             phi_pred_t_t = x_pred_t_t_1.float() + node_kalman_reshaped.float() @ cross_kalman_reshaped.float()
         else:
             phi_pred_t_t = x_pred_t_t_1.float() + node_kalman_reshaped.float() @ edge_kalman_filter_summed.float()
@@ -437,7 +471,8 @@ class GraphKalmanProcess(pl.LightningModule):
     def __init__(self, f_system, signal_dim, edge_features_dim, node_kalman_dim, edge_kalman_dim, r_array,
                  hidden_dim=32, heads=1, dropout=0.0,
                  lr: float | None = None, learning_rate: float | None = None,
-                 learn_edge_kalman=True, x0_scale=10, consensus_layer: str | None = "none"):
+                 learn_edge_kalman=True, x0_scale=10, consensus_layer: str | None = "none",
+                 position_only_loss: bool = False):
         super(GraphKalmanProcess, self).__init__()
         self.signal_dim = signal_dim
         self.hidden_dim = hidden_dim
@@ -445,6 +480,7 @@ class GraphKalmanProcess(pl.LightningModule):
         self.edge_kalman_dim = edge_kalman_dim
         self.r_array = r_array
         self.x0_scale = x0_scale
+        self.position_only_loss = bool(position_only_loss)
         self.gkf = GraphKalmanFilter(
             f_system, signal_dim, node_kalman_dim,
             edge_features_dim, r_array, hidden_dim, heads, dropout, learn_edge_kalman, consensus_layer=consensus_layer
@@ -527,7 +563,8 @@ class GraphKalmanProcess(pl.LightningModule):
     def _shared_step(self, batch, batch_idx, mode='train'):
         x_true = batch.y.reshape(batch.num_graphs, -1, self.signal_dim, 1)
         x_pred = self(batch).to(device=x_true.device)
-        loss = loss_function(x_pred, x_true)
+        position_indices = [0, 2] if self.position_only_loss else None
+        loss = loss_function(x_pred, x_true, position_indices=position_indices)
         self.log(f"{mode}_loss", loss, batch_size=len(batch), on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
