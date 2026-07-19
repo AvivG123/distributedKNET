@@ -54,13 +54,14 @@ def test_rng_streams_do_not_overlap_for_adjacent_dataset_seeds():
     assert train_streams.isdisjoint(validation_streams)
 
 
-def test_velocity_only_process_covariance_leaves_positions_noise_free():
+def test_full_state_process_covariance_noises_all_components():
     x0 = np.zeros((128, 4, 1), dtype=np.float32)
-    covariance = np.diag([0.0, 4.0, 0.0, 9.0])
+    covariance = np.eye(4) * 4.0
     samples = generate_data_points(lambda state: state, covariance, x0, 1, seed=3)
-    assert np.count_nonzero(samples[:, [0, 2], :, :]) == 0
+    assert np.std(samples[:, 0, 0, 0]) > 1.0
     assert np.std(samples[:, 1, 0, 0]) > 1.0
-    assert np.std(samples[:, 3, 0, 0]) > 2.0
+    assert np.std(samples[:, 2, 0, 0]) > 1.0
+    assert np.std(samples[:, 3, 0, 0]) > 1.0
 
 
 def test_noise_derivation_and_sensor_specific_measurement_std():
@@ -71,7 +72,7 @@ def test_noise_derivation_and_sensor_specific_measurement_std():
     assert np.isclose(noise["sigma_theta"], 2.0 * math.radians(2.0))
     assert np.allclose(
         noise["q_matrix"],
-        np.diag([0.0, 40.0, 0.0, 40.0]),
+        np.eye(4) * 40.0,
     )
 
     observation = DistanceAngleObservation(np.zeros((4, 2)))

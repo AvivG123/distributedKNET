@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -19,6 +20,7 @@ from utils.DistributedKalmanData import GraphDataset
 from utils.LocalizationScenario import (
     ConstantVelocityModel,
     DistanceAngleObservation,
+    build_dkn_model,
     create_distance_based_graph,
     generate_node_positions,
     localization_x0,
@@ -35,7 +37,7 @@ def derive_localization_noise(mu, rho, r_scale):
     q = r_scale * math.sqrt(mu)
     sigma_r = r_scale
     sigma_theta = r_scale / math.sqrt(rho)
-    q_matrix = np.diag([0.0, q ** 2, 0.0, q ** 2])
+    q_matrix = np.eye(4) * q ** 2
     return {
         "q": q,
         "sigma_r": sigma_r,
@@ -219,26 +221,6 @@ def restore_best_weights(trainer, model):
     return Path(best_path)
 
 
-def build_dkn_model(config, f_model, r_array, x0):
-    from utils.DistributedKalmanNet import GraphKalmanProcess
-
-    state_dimension = int(config["state_dimension"])
-    return GraphKalmanProcess(
-        f_model,
-        signal_dim=state_dimension,
-        edge_features_dim=1,
-        node_kalman_dim=state_dimension ** 2,
-        edge_kalman_dim=2,
-        hidden_dim=config["hidden_dim"],
-        lr=config["learning_rate"],
-        r_array=r_array,
-        learn_edge_kalman=config["learn_edge_kalman"],
-        x0_scale=x0,
-        consensus_layer=config.get("consensus_layer", "none"),
-        position_only_loss=config.get("position_only_loss", False),
-    )
-
-
 def build_gnn_rnn_model(config):
     from utils.BaselineModels import GnnRnnLightning
 
@@ -248,6 +230,7 @@ def build_gnn_rnn_model(config):
         hidden_dim=config.get("gnn_rnn_hidden_dim", config["hidden_dim"]),
         output_dim=config["state_dimension"],
         lr=config.get("gnn_rnn_learning_rate", config["learning_rate"]),
+        position_only_loss=config.get("position_only_loss", False),
     )
 
 
@@ -538,19 +521,50 @@ def plot_prediction_sample(
     plt.close(fig)
 
 
-def plot_graph(adjacency_matrix, node_positions, title="Sensor Network Graph", save_path=None):
+# Sensor colors keyed by node classification: type 1 measures range (uses sigma_r),
+# type 0 measures bearing/angle (uses sigma_theta). See make_r_std_vector.
+RANGE_SENSOR_COLOR = "#e63946"
+BEARING_SENSOR_COLOR = "#457b9d"
+
+
+def sensor_color(node_type):
+    return RANGE_SENSOR_COLOR if node_type == 1 else BEARING_SENSOR_COLOR
+
+
+def sensor_legend_handles():
+    return [
+        Line2D(
+            [], [], marker="s", linestyle="none", markersize=10,
+            color=RANGE_SENSOR_COLOR, label="TOA sensor (range, type 1)",
+        ),
+        Line2D(
+            [], [], marker="s", linestyle="none", markersize=10,
+            color=BEARING_SENSOR_COLOR, label="DOA sensor (bearing, type 0)",
+        ),
+    ]
+
+
+def plot_graph(
+    adjacency_matrix, node_positions, node_types=None, title="Sensor Network Graph", save_path=None
+):
     fig, axis = plt.subplots(figsize=(6, 6))
     graph = nx.from_numpy_array(adjacency_matrix)
+    if node_types is not None:
+        node_color = [sensor_color(node_types[idx]) for idx in range(len(node_positions))]
+    else:
+        node_color = "tomato"
     nx.draw(
         graph,
         {idx: node_positions[idx] for idx in range(len(node_positions))},
         ax=axis,
         with_labels=True,
-        node_color="tomato",
+        node_color=node_color,
         edge_color="gray",
         node_size=500,
         font_size=10,
     )
+    if node_types is not None:
+        axis.legend(handles=sensor_legend_handles(), loc="best")
     axis.set_title(title)
     if save_path is not None:
         fig.savefig(save_path, dpi=200, bbox_inches="tight")
@@ -562,13 +576,15 @@ def plot_trajectory_and_nodes(
 ):
     values = trajectory.detach().cpu().numpy() if isinstance(trajectory, torch.Tensor) else trajectory
     plt.figure(figsize=(10, 10))
-    plt.plot(values[:, 0, 0], values[:, 2, 0], "b-", label="Trajectory")
+    trajectory_handle, = plt.plot(
+        values[:, 0, 0], values[:, 2, 0], "b-", label="Trajectory"
+    )
     for idx, position in enumerate(node_positions):
-        color = "#e63946" if node_types[idx] == 1 else "#457b9d"
-        plt.plot(*position, marker="s", markersize=12, color=color)
+        plt.plot(*position, marker="s", markersize=12, color=sensor_color(node_types[idx]))
     plt.title(title)
     plt.axis("equal")
     plt.grid(True, alpha=0.3)
+    plt.legend(handles=[trajectory_handle, *sensor_legend_handles()])
     plt.show()
 
 
@@ -609,13 +625,18 @@ def plot_tracking_results(
         axes[1].plot(error, label=f"{label} (mean: {error.mean():.4f})")
     if node_positions is not None and node_types is not None:
         for idx, position in enumerate(node_positions):
-            color = "#e63946" if node_types[idx] == 1 else "#457b9d"
-            axes[0].plot(*position, "s", color=color)
+            axes[0].plot(*position, "s", color=sensor_color(node_types[idx]))
     axes[0].set(title="Trajectory Comparison", xlabel="x", ylabel="y")
     axes[1].set(title="Estimation Error", xlabel="Time step", ylabel="Position error")
     for axis in axes:
-        axis.legend()
         axis.grid(True, alpha=0.3)
+    trajectory_handles, trajectory_labels = axes[0].get_legend_handles_labels()
+    extra_handles = sensor_legend_handles() if node_types is not None else []
+    axes[0].legend(
+        handles=trajectory_handles + extra_handles,
+        labels=trajectory_labels + [handle.get_label() for handle in extra_handles],
+    )
+    axes[1].legend()
     fig.tight_layout()
     if save_path is not None:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
@@ -660,13 +681,13 @@ def plot_generated_trajectories(
         trajectory = trajectories[idx]
         values = trajectory.detach().cpu().numpy() if isinstance(trajectory, torch.Tensor) else trajectory
         axis = axes[0, idx]
-        axis.plot(values[:, 0, 0], values[:, 2, 0], "b-")
+        trajectory_handle, = axis.plot(values[:, 0, 0], values[:, 2, 0], "b-", label="Trajectory")
         for node_idx, position in enumerate(node_positions):
-            color = "#e63946" if node_types[node_idx] == 1 else "#457b9d"
-            axis.plot(*position, "s", color=color)
+            axis.plot(*position, "s", color=sensor_color(node_types[node_idx]))
         axis.set_title(f"{title_prefix} #{idx + 1}")
         axis.axis("equal")
         axis.grid(True, alpha=0.3)
+        axis.legend(handles=[trajectory_handle, *sensor_legend_handles()])
     fig.tight_layout()
     if save_path is not None:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
@@ -711,7 +732,13 @@ def run_localization_experiment(config, *, root_dir: Path, description: str | No
     for directory in directories:
         directory.mkdir(parents=True, exist_ok=True)
     save_experiment_config(experiment_dir, config, node_positions)
-    plot_graph(adjacency, node_positions, save_path=directories[0] / "sensor_graph.png")
+    node_types = h_system.node_classification[:, 0].cpu().numpy().astype(int)
+    plot_graph(
+        adjacency,
+        node_positions,
+        node_types=node_types,
+        save_path=directories[0] / "sensor_graph.png",
+    )
 
     dt_values = (
         config.get("dt_mismatch_values", [1.0])

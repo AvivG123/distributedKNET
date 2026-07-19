@@ -86,7 +86,7 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
         "area_size": 100.0,
         "p0_scale": 10.0,
         "use_dt_mismatch": True,
-        "dt_mismatch_values": [1.0, 2.0],
+        "dt_mismatch_values": [1, 2.0],
     },
     "graph": {
         "node_num": 50,
@@ -97,7 +97,7 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
         "time_steps": 20,
         "mu": 1,  # q**2 / r_scale**2
         "rho": (1.0 / math.radians(10.0)) ** 2,
-        "r_scale": [1.0],
+        "r_scale": [1],
         # q           = r_scale * math.sqrt(mu)
         # sigma_r     = r_scale
         # sigma_theta = r_scale / math.sqrt(rho)
@@ -114,8 +114,8 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
         "edge_kalman_dim": 2,
         "hidden_dim": 128,
         "lr": 1e-4,
-        "learn_edge_kalman": True,
-        "train_models": ["dkn", "gnn-rnn"],
+        "learn_edge_kalmanq": True,
+        "train_models": ["dkn"],
         "gnn_rnn_hidden_dim": 128,
         "gnn_rnn_learning_rate": 1e-4,
         "consensus_layer": "adaptive",

@@ -2,8 +2,10 @@ import sys
 from pathlib import Path
 
 import torch
+from torch_geometric.data import Batch, Data
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from utils.BaselineModels import GnnRnnLightning
 from utils.DistributedKalmanNet import (
     AdaptiveMeanConv,
     EdgeKalmanFilter,
@@ -31,6 +33,44 @@ def test_position_only_loss_has_finite_gradient_at_zero_error():
     assert torch.isfinite(loss)
     assert torch.isfinite(x_pred.grad).all()
     assert torch.count_nonzero(x_pred.grad) == 0
+
+
+class _FixedPredictionGnnRnn(GnnRnnLightning):
+    def __init__(self, fixed_prediction, position_only_loss):
+        super().__init__(output_dim=4, position_only_loss=position_only_loss)
+        self.fixed_prediction = fixed_prediction
+
+    def forward(self, measurements, node_types, edge_index, hidden=None):
+        return self.fixed_prediction.to(device=measurements.device, dtype=measurements.dtype)
+
+
+class _NodeTypesObservation:
+    node_classification = torch.tensor([[0], [1]])
+
+
+def test_gnn_rnn_respects_position_only_loss():
+    batch = Batch.from_data_list(
+        [
+            Data(
+                x=torch.zeros(2, 1, 1),
+                edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+                y=torch.zeros(1, 4, 1),
+                h_system=_NodeTypesObservation(),
+            )
+        ]
+    )
+    velocity_only_error = torch.zeros(2, 1, 4)
+    velocity_only_error[:, :, [1, 3]] = torch.tensor([10.0, -10.0])
+
+    full_state_model = _FixedPredictionGnnRnn(
+        velocity_only_error, position_only_loss=False
+    )
+    position_only_model = _FixedPredictionGnnRnn(
+        velocity_only_error, position_only_loss=True
+    )
+
+    assert full_state_model._shared_step(batch, 0).item() > 0
+    assert position_only_model._shared_step(batch, 0).item() == 0
 
 
 def test_adaptive_mean_conv_is_learnable():

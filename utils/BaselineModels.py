@@ -7,9 +7,18 @@ from utils.DistributedKalmanNet import loss_function
 
 
 class GnnRnnLightning(pl.LightningModule):
-    def __init__(self, input_dim=1, type_num=2, hidden_dim=32, output_dim=2, lr=5e-5):
+    def __init__(
+        self,
+        input_dim=1,
+        type_num=2,
+        hidden_dim=32,
+        output_dim=2,
+        lr=5e-5,
+        position_only_loss: bool = False,
+    ):
         super(GnnRnnLightning, self).__init__()
         self.output_dim = output_dim
+        self.position_only_loss = bool(position_only_loss)
         self.fc_measurement = torch.nn.Sequential(
             torch.nn.Linear(input_dim, hidden_dim),
             torch.nn.LeakyReLU(),
@@ -78,7 +87,8 @@ class GnnRnnLightning(pl.LightningModule):
         x_pred = x_pred.reshape(batch.num_graphs, node_number, batch.x.shape[1], self.output_dim)
         x_pred = x_pred.permute(0, 2, 1, 3).unsqueeze(-1)
 
-        loss = loss_function(x_pred, x_true)
+        position_indices = [0, 2] if self.position_only_loss else None
+        loss = loss_function(x_pred, x_true, position_indices=position_indices)
         self.log(f'{mode}_loss', loss, batch_size=len(batch), on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
