@@ -118,6 +118,7 @@ def normalize_localization_config(config):
             normalized["mu"] = (legacy_q / reference_r) ** 2 if reference_r else 0.0
         normalized.setdefault("rho", 1.0)
         normalized.setdefault("position_only_loss", False)
+        normalized.setdefault("curriculum", {})
         return normalized
 
     system = config["system"]
@@ -170,6 +171,7 @@ def normalize_localization_config(config):
         "preview_trajectories": int(data.get("preview_trajectories", 4)),
         "consensus_layer": model.get("consensus_layer", "none"),
         "position_only_loss": bool(model.get("position_only_loss", False)),
+        "curriculum": dict(config.get("curriculum", {})),
     }
 
 
@@ -207,18 +209,91 @@ def build_localization_trainer(
     )
 
 
-def restore_best_weights(trainer, model):
-    checkpoint_callback = next(
-        callback
-        for callback in trainer.callbacks
-        if isinstance(callback, pl.callbacks.ModelCheckpoint)
-    )
-    best_path = checkpoint_callback.best_model_path
-    if not best_path:
+def localization_curriculum_schedule(curriculum_cfg, base_time_steps):
+    """Time-step schedule for curriculum learning; [base] when disabled."""
+    if not bool(curriculum_cfg.get("enabled", False)):
+        return [base_time_steps]
+    start = int(curriculum_cfg.get("start_time_steps", 10))
+    step = int(curriculum_cfg.get("step_time_steps", 10))
+    maximum = int(curriculum_cfg.get("max_time_steps", base_time_steps))
+    if step <= 0:
+        raise ValueError("curriculum.step_time_steps must be positive")
+    if maximum < start:
+        raise ValueError("curriculum.max_time_steps must be >= curriculum.start_time_steps")
+    schedule = list(range(start, maximum + 1, step))
+    if base_time_steps not in schedule:
+        schedule.append(base_time_steps)
+    return sorted(set(schedule))
+
+
+def train_localization_curriculum(
+    config,
+    model,
+    accelerator,
+    *,
+    checkpoint_dir,
+    checkpoint_name,
+    stage_loaders,
+    schedule,
+):
+    """Fit ``model`` across the curriculum ``schedule``.
+
+    Mirrors the non-localization curriculum in ``run_one_experiment``: each stage
+    warm-starts from the *last-epoch* weights of the previous stage (the model is
+    not reloaded between stages), and the returned model is the *global* best
+    validation checkpoint across all stages -- which may be an earlier, shorter
+    stage. Returns that global-best checkpoint path; the other stage checkpoints
+    are removed."""
+    curriculum_cfg = config.get("curriculum", {})
+    enabled = bool(curriculum_cfg.get("enabled", False))
+    epochs_per_stage = int(curriculum_cfg.get("epochs_per_stage", config["max_epochs"]))
+    staged = enabled and len(schedule) > 1
+    best_val = None
+    best_checkpoint = None
+    stage_checkpoints = []
+    for stage_time_steps, (train_loader, val_loader) in zip(schedule, stage_loaders):
+        stage_name = (
+            f"{checkpoint_name}.ts{stage_time_steps}" if staged else checkpoint_name
+        )
+        stage_max_epochs = epochs_per_stage if enabled else config["max_epochs"]
+        trainer = build_localization_trainer(
+            {**config, "max_epochs": stage_max_epochs},
+            accelerator,
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_name=stage_name,
+        )
+        # No reload between stages: fit continues from the previous stage's
+        # last-epoch weights, matching run_one_experiment.
+        trainer.fit(model, train_loader, val_loader)
+        checkpoint_cb = next(
+            cb for cb in trainer.callbacks if isinstance(cb, pl.callbacks.ModelCheckpoint)
+        )
+        stage_best_val = (
+            checkpoint_cb.best_model_score.item()
+            if checkpoint_cb.best_model_score is not None
+            else None
+        )
+        stage_best_path = (
+            Path(checkpoint_cb.best_model_path)
+            if checkpoint_cb.best_model_path
+            else None
+        )
+        if stage_best_path is not None:
+            stage_checkpoints.append(stage_best_path)
+        if stage_best_val is not None and (best_val is None or stage_best_val < best_val):
+            best_val = stage_best_val
+            best_checkpoint = stage_best_path
+    if best_checkpoint is None:
         raise RuntimeError("Training did not produce a best validation checkpoint.")
-    checkpoint = torch.load(best_path, map_location="cpu")
+    # Load the global-best checkpoint (across all stages) into the model.
+    checkpoint = torch.load(best_checkpoint, map_location="cpu")
     model.load_state_dict(checkpoint["state_dict"])
-    return Path(best_path)
+    # Remove intermediate stage checkpoints; keep the global best (returned so
+    # the caller can delete it after saving the final .pt).
+    for path in stage_checkpoints:
+        if path != best_checkpoint:
+            path.unlink(missing_ok=True)
+    return best_checkpoint
 
 
 def build_gnn_rnn_model(config):
@@ -757,22 +832,57 @@ def run_localization_experiment(config, *, root_dir: Path, description: str | No
             "h_system": h_system,
             "q": noise["q_matrix"],
             "r_array": r_array,
-            "time_steps": config["time_steps"],
             "n_expansions": 1,
-            "x0": x0,
             "state_dim": state_dimension,
             "p0": config["p0_scale"],
         }
-        train_dataset = GraphDataset(
-            monte_carlo_simulations=config["train_sims"],
-            seed=config["seed"],
-            **dataset_kwargs,
+        # Build one train/val loader per curriculum stage (a single full-length
+        # stage when curriculum is disabled). Loaders are shared across models.
+        schedule = localization_curriculum_schedule(
+            config.get("curriculum", {}), config["time_steps"]
         )
-        val_dataset = GraphDataset(
-            monte_carlo_simulations=config["val_sims"],
-            seed=config["seed"] + 1,
-            **dataset_kwargs,
-        )
+        stage_loaders = []
+        train_dataset = val_dataset = None
+        for stage_time_steps in schedule:
+            stage_x0 = np.asarray(
+                localization_x0(
+                    config["area_size"], config["time_delta"], stage_time_steps
+                ),
+                dtype=float,
+            ).reshape(state_dimension, 1)
+            stage_kwargs = {
+                **dataset_kwargs,
+                "time_steps": stage_time_steps,
+                "x0": stage_x0,
+            }
+            train_dataset = GraphDataset(
+                monte_carlo_simulations=config["train_sims"],
+                seed=config["seed"],
+                **stage_kwargs,
+            )
+            val_dataset = GraphDataset(
+                monte_carlo_simulations=config["val_sims"],
+                seed=config["seed"] + 1,
+                **stage_kwargs,
+            )
+            stage_loaders.append(
+                (
+                    DataLoader(
+                        train_dataset,
+                        shuffle=True,
+                        batch_size=config["batch_size"],
+                        num_workers=0,
+                    ),
+                    DataLoader(
+                        val_dataset,
+                        shuffle=False,
+                        batch_size=config["batch_size"],
+                        num_workers=0,
+                    ),
+                )
+            )
+        # train_dataset / val_dataset now hold the final (full-length) stage,
+        # used for the preview plot and the validation prediction samples below.
         preview = [
             train_dataset[idx].y.cpu()
             for idx in range(min(config["preview_trajectories"], len(train_dataset)))
@@ -785,26 +895,21 @@ def run_localization_experiment(config, *, root_dir: Path, description: str | No
             title_prefix=f"Training trajectories (r={r_scale})",
             save_path=directories[0] / f"r={r_scale}_trajectories.png",
         )
-        train_loader = DataLoader(
-            train_dataset, shuffle=True, batch_size=config["batch_size"], num_workers=0
-        )
-        val_loader = DataLoader(
-            val_dataset, shuffle=False, batch_size=config["batch_size"], num_workers=0
-        )
 
         if "gnn_rnn" in train_models:
             path = gnn_rnn_model_path(
                 experiment_dir, r_scale, config=config, for_save=True
             )
             model = build_gnn_rnn_model(config).to(torch.float32)
-            trainer = build_localization_trainer(
+            best_checkpoint = train_localization_curriculum(
                 config,
+                model,
                 accelerator,
                 checkpoint_dir=path.parent,
                 checkpoint_name=f"{path.stem}.best",
+                stage_loaders=stage_loaders,
+                schedule=schedule,
             )
-            trainer.fit(model, train_loader, val_loader)
-            best_checkpoint = restore_best_weights(trainer, model)
             torch.save(model.state_dict(), path)
             best_checkpoint.unlink(missing_ok=True)
             sample = val_dataset[0].to(next(model.parameters()).device)
@@ -831,14 +936,15 @@ def run_localization_experiment(config, *, root_dir: Path, description: str | No
             )
             f_model = ConstantVelocityModel(config["time_delta"] * dt_ratio)
             model = build_dkn_model(config, f_model, r_array, x0).to(torch.float32)
-            trainer = build_localization_trainer(
+            best_checkpoint = train_localization_curriculum(
                 config,
+                model,
                 accelerator,
                 checkpoint_dir=path.parent,
                 checkpoint_name=f"{path.stem}.best",
+                stage_loaders=stage_loaders,
+                schedule=schedule,
             )
-            trainer.fit(model, train_loader, val_loader)
-            best_checkpoint = restore_best_weights(trainer, model)
             torch.save(model.state_dict(), path)
             best_checkpoint.unlink(missing_ok=True)
             sample = val_dataset[0].to(next(model.parameters()).device)

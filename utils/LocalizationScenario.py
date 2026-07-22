@@ -326,6 +326,26 @@ def build_graph_data_for_dkn(adjacency_matrix, h_system, trajectory, measurement
     )
 
 
+def build_dkn_model(config, f_model, r_array, x0):
+    from utils.DistributedKalmanNet import GraphKalmanProcess
+
+    state_dimension = int(config["state_dimension"])
+    return GraphKalmanProcess(
+        f_model,
+        signal_dim=state_dimension,
+        edge_features_dim=1,
+        node_kalman_dim=state_dimension ** 2,
+        edge_kalman_dim=2,
+        hidden_dim=config["hidden_dim"],
+        lr=config["learning_rate"],
+        r_array=r_array,
+        learn_edge_kalman=config["learn_edge_kalman"],
+        x0_scale=x0,
+        consensus_layer=config.get("consensus_layer", "none"),
+        position_only_loss=config.get("position_only_loss", False),
+    )
+
+
 def clean_measurements_for_trajectory(h_system, trajectory):
     clean = np.zeros((h_system.num_nodes, 1, trajectory.shape[0]))
     for time_idx in range(trajectory.shape[0]):

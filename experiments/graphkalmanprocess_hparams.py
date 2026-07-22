@@ -81,12 +81,11 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
     "seed": 42,
     "save_root": "my_models",
     "system": {
-        "kind": "localization",
         "time_delta": 0.1,
         "area_size": 100.0,
         "p0_scale": 10.0,
         "use_dt_mismatch": True,
-        "dt_mismatch_values": [1, 2.0],
+        "dt_mismatch_values": [2.0],
     },
     "graph": {
         "node_num": 50,
@@ -126,6 +125,14 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
         "early_stop_patience": 5,
         "early_stop_min_delta": 0.001,
         "gradient_clip_val": 1,
+    },
+    "curriculum": {
+
+        "enabled": True,
+        "start_time_steps": 10,
+        "step_time_steps": 10,
+        "max_time_steps": 20,
+        "epochs_per_stage": 10,
     },
 })
 
