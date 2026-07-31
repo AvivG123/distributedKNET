@@ -184,11 +184,13 @@ class AdaptiveMeanConv(MessagePassing):
         self._reset_parameters()
 
     def _reset_parameters(self) -> None:
-        # Non-degenerate init is required; zero init freezes the whole MLP
-        # because ReLU blocks gradient flow through the attention stack.
+        # Non-degenerate weights are required: with zero weights the first ReLU
+        # outputs exactly 0, whose derivative is 0, so no gradient reaches the
+        # attention stack and it stays frozen at uniform attention. Zero biases
+        # keep the initial logits small, so attention still starts near uniform.
         for module in self.att_mlp:
             if isinstance(module, torch.nn.Linear):
-                torch.nn.init.zeros_(module.weight)
+                torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     torch.nn.init.zeros_(module.bias)
 

@@ -91,6 +91,24 @@ def _as_scale_list(value):
     return scales
 
 
+def _resolve_x0(x0, area_size, time_delta, time_steps, state_dimension):
+    """Fixed nominal initial state, or the legacy time-grid derived one.
+
+    Configs are expected to carry an explicit ``x0`` so that it stays constant
+    across curriculum stages. ``localization_x0`` is only used for older configs
+    that predate the explicit field.
+    """
+    if x0 is None:
+        return localization_x0(area_size, time_delta, time_steps)
+    values = [float(value) for value in np.asarray(x0, dtype=float).reshape(-1)]
+    if len(values) != int(state_dimension):
+        raise ValueError(
+            f"x0 must have {int(state_dimension)} entries for [x, vx, y, vy]; "
+            f"got {len(values)}."
+        )
+    return values
+
+
 def normalize_localization_config(config):
     """Flatten a localization preset while accepting legacy saved run configs."""
 
@@ -101,13 +119,12 @@ def normalize_localization_config(config):
             normalized.get("train_time_steps", normalized.get("test_time_steps", 20)),
         )
         normalized.setdefault("area_size", 100.0)
-        normalized.setdefault(
-            "x0",
-            localization_x0(
-                normalized["area_size"],
-                normalized["time_delta"],
-                normalized["time_steps"],
-            ),
+        normalized["x0"] = _resolve_x0(
+            normalized.get("x0"),
+            normalized["area_size"],
+            normalized["time_delta"],
+            normalized["time_steps"],
+            normalized.get("state_dimension", 4),
         )
         if "r_scale" not in normalized:
             normalized["r_scale"] = normalized.get("measurement_noise_values", [1.0])
@@ -129,6 +146,7 @@ def normalize_localization_config(config):
     time_steps = int(data["time_steps"])
     area_size = float(system["area_size"])
     time_delta = float(system["time_delta"])
+    state_dimension = int(model.get("signal_dim", 4))
     r_scales = _as_scale_list(data.get("r_scale", data.get("measurement_noise_values")))
     if "mu" in data:
         mu = float(data["mu"])
@@ -138,9 +156,11 @@ def normalize_localization_config(config):
     return {
         "seed": int(config["seed"]),
         "save_root": config["save_root"],
-        "state_dimension": int(model.get("signal_dim", 4)),
+        "state_dimension": state_dimension,
         "area_size": area_size,
-        "x0": localization_x0(area_size, time_delta, time_steps),
+        "x0": _resolve_x0(
+            system.get("x0"), area_size, time_delta, time_steps, state_dimension
+        ),
         "time_delta": time_delta,
         "mu": mu,
         "rho": float(data.get("rho", 1.0)),
@@ -844,16 +864,12 @@ def run_localization_experiment(config, *, root_dir: Path, description: str | No
         stage_loaders = []
         train_dataset = val_dataset = None
         for stage_time_steps in schedule:
-            stage_x0 = np.asarray(
-                localization_x0(
-                    config["area_size"], config["time_delta"], stage_time_steps
-                ),
-                dtype=float,
-            ).reshape(state_dimension, 1)
+            # Stages differ only in horizon length; x0 is fixed so every stage
+            # trains on the same scenario and matches the model initialization.
             stage_kwargs = {
                 **dataset_kwargs,
                 "time_steps": stage_time_steps,
-                "x0": stage_x0,
+                "x0": x0,
             }
             train_dataset = GraphDataset(
                 monte_carlo_simulations=config["train_sims"],

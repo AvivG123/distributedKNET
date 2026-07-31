@@ -83,9 +83,10 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
     "system": {
         "time_delta": 0.1,
         "area_size": 100.0,
+        "x0": [0.0, 50.0, 0.0, 50.0],
         "p0_scale": 10.0,
         "use_dt_mismatch": True,
-        "dt_mismatch_values": [2.0],
+        "dt_mismatch_values": [1.0],
     },
     "graph": {
         "node_num": 50,
@@ -113,7 +114,7 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
         "edge_kalman_dim": 2,
         "hidden_dim": 128,
         "lr": 1e-4,
-        "learn_edge_kalmanq": True,
+        "learn_edge_kalman": True,
         "train_models": ["dkn"],
         "gnn_rnn_hidden_dim": 128,
         "gnn_rnn_learning_rate": 1e-4,
@@ -127,8 +128,7 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
         "gradient_clip_val": 1,
     },
     "curriculum": {
-
-        "enabled": True,
+        "enabled": False,
         "start_time_steps": 10,
         "step_time_steps": 10,
         "max_time_steps": 20,
