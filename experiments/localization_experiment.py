@@ -255,6 +255,7 @@ def train_localization_curriculum(
     checkpoint_name,
     stage_loaders,
     schedule,
+    label="",
 ):
     """Fit ``model`` across the curriculum ``schedule``.
 
@@ -271,11 +272,26 @@ def train_localization_curriculum(
     best_val = None
     best_checkpoint = None
     stage_checkpoints = []
-    for stage_time_steps, (train_loader, val_loader) in zip(schedule, stage_loaders):
+    print(f"\n=== Training: {label or checkpoint_name} ===")
+    print(f"checkpoint_dir: {checkpoint_dir}")
+    print(f"accelerator: {accelerator} | curriculum schedule: {schedule}")
+    print(
+        f"epochs: {epochs_per_stage if enabled else config['max_epochs']} | "
+        f"lr: {config['learning_rate']} | batch_size: {config['batch_size']} | "
+        f"train_sims: {config['train_sims']} | val_sims: {config['val_sims']}"
+    )
+    for stage_index, (stage_time_steps, (train_loader, val_loader)) in enumerate(
+        zip(schedule, stage_loaders), start=1
+    ):
         stage_name = (
             f"{checkpoint_name}.ts{stage_time_steps}" if staged else checkpoint_name
         )
         stage_max_epochs = epochs_per_stage if enabled else config["max_epochs"]
+        if staged:
+            print(
+                f"-- stage {stage_index}/{len(schedule)}: "
+                f"time_steps={stage_time_steps}, max_epochs={stage_max_epochs}"
+            )
         trainer = build_localization_trainer(
             {**config, "max_epochs": stage_max_epochs},
             accelerator,
@@ -925,6 +941,10 @@ def run_localization_experiment(config, *, root_dir: Path, description: str | No
                 checkpoint_name=f"{path.stem}.best",
                 stage_loaders=stage_loaders,
                 schedule=schedule,
+                label=(
+                    f"GNN-RNN | {experiment_dir.name} | r={r_scale} | "
+                    f"q={noise['q']:g} | -> {path.name}"
+                ),
             )
             torch.save(model.state_dict(), path)
             best_checkpoint.unlink(missing_ok=True)
@@ -960,6 +980,12 @@ def run_localization_experiment(config, *, root_dir: Path, description: str | No
                 checkpoint_name=f"{path.stem}.best",
                 stage_loaders=stage_loaders,
                 schedule=schedule,
+                label=(
+                    f"DKN | {experiment_dir.name} | r={r_scale} | q={noise['q']:g} | "
+                    f"dt x{dt_ratio} | hidden_dim={config['hidden_dim']} | "
+                    f"edge_kalman={config['learn_edge_kalman']} | "
+                    f"consensus={config.get('consensus_layer', 'none')} | -> {path.name}"
+                ),
             )
             torch.save(model.state_dict(), path)
             best_checkpoint.unlink(missing_ok=True)

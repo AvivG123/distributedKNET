@@ -86,7 +86,7 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
         "x0": [0.0, 50.0, 0.0, 50.0],
         "p0_scale": 10.0,
         "use_dt_mismatch": True,
-        "dt_mismatch_values": [1.0],
+        "dt_mismatch_values": [1.0, 2.0],
     },
     "graph": {
         "node_num": 50,
@@ -95,9 +95,9 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
     },
     "data": {
         "time_steps": 20,
-        "mu": 1,  # q**2 / r_scale**2
-        "rho": (1.0 / math.radians(10.0)) ** 2,
-        "r_scale": [1],
+        "mu": 1,        # q**2 / r_scale**2
+        "rho": 25,      # keep noises ratio at 5 matching the "Consensus-Based Linear and Nonlinear Filtering" convention
+        "r_scale": [0.25, 0.5, 1.0, 2.0, 4.0],
         # q           = r_scale * math.sqrt(mu)
         # sigma_r     = r_scale
         # sigma_theta = r_scale / math.sqrt(rho)
@@ -115,7 +115,7 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
         "hidden_dim": 128,
         "lr": 1e-4,
         "learn_edge_kalman": True,
-        "train_models": ["dkn"],
+        "train_models": ["dkn", "gnn_rnn"],
         "gnn_rnn_hidden_dim": 128,
         "gnn_rnn_learning_rate": 1e-4,
         "consensus_layer": "adaptive",
@@ -132,7 +132,7 @@ LOCALIZATION_BASELINE: dict = _with(BASELINE, {
         "start_time_steps": 10,
         "step_time_steps": 10,
         "max_time_steps": 20,
-        "epochs_per_stage": 10,
+        "epochs_per_stage": 20,
     },
 })
 
