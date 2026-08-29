@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import networkx as nx
 import numpy as np
-import pandas as pd
 import pytorch_lightning as pl
 import torch
 from torch_geometric.loader import DataLoader
@@ -82,13 +81,28 @@ def normalize_localization_train_models(config):
     return result
 
 
+def _as_float_list(value, field):
+    """Coerce a sequence, scalar, or comma-separated string into a float list.
+
+    The string form keeps list-valued keys reachable from ``--override``, which
+    parses values into scalars only.
+    """
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",") if item.strip()]
+    elif np.isscalar(value):
+        items = [value]
+    else:
+        items = list(value)
+    if not items:
+        raise ValueError(f"{field} must contain at least one value.")
+    try:
+        return [float(item) for item in items]
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field} must contain only numbers; got {value!r}.") from error
+
+
 def _as_scale_list(value):
-    if np.isscalar(value):
-        return [float(value)]
-    scales = [float(item) for item in value]
-    if not scales:
-        raise ValueError("r_scale must contain at least one value.")
-    return scales
+    return _as_float_list(value, "r_scale")
 
 
 def _resolve_x0(x0, area_size, time_delta, time_steps, state_dimension):
@@ -129,6 +143,10 @@ def normalize_localization_config(config):
         if "r_scale" not in normalized:
             normalized["r_scale"] = normalized.get("measurement_noise_values", [1.0])
         normalized["r_scale"] = _as_scale_list(normalized["r_scale"])
+        if "dt_mismatch_values" in normalized:
+            normalized["dt_mismatch_values"] = _as_float_list(
+                normalized["dt_mismatch_values"], "dt_mismatch_values"
+            )
         if "mu" not in normalized:
             legacy_q = float(normalized.get("process_noise_std", 1.0))
             reference_r = normalized["r_scale"][0]
@@ -167,7 +185,9 @@ def normalize_localization_config(config):
         "r_scale": r_scales,
         "p0_scale": float(system["p0_scale"]),
         "use_dt_mismatch": bool(system.get("use_dt_mismatch", False)),
-        "dt_mismatch_values": system.get("dt_mismatch_values", [1.0]),
+        "dt_mismatch_values": _as_float_list(
+            system.get("dt_mismatch_values", [1.0]), "dt_mismatch_values"
+        ),
         "num_nodes": int(graph["node_num"]),
         "graph_seed": int(graph.get("graph_seed", config["seed"])),
         "k_neighbors": int(graph["k_neighbors"]),
@@ -246,6 +266,18 @@ def localization_curriculum_schedule(curriculum_cfg, base_time_steps):
     return sorted(set(schedule))
 
 
+def select_curriculum_checkpoint(stage_results):
+    """Pick which stage's checkpoint to keep from ``[(path, val_loss), ...]``.
+
+    The last stage that produced one wins; val losses are not comparable across
+    horizons, so the argmin would favour short-horizon stages.
+    """
+    for path, _ in reversed(stage_results):
+        if path is not None:
+            return path
+    return None
+
+
 def train_localization_curriculum(
     config,
     model,
@@ -259,19 +291,14 @@ def train_localization_curriculum(
 ):
     """Fit ``model`` across the curriculum ``schedule``.
 
-    Mirrors the non-localization curriculum in ``run_one_experiment``: each stage
-    warm-starts from the *last-epoch* weights of the previous stage (the model is
-    not reloaded between stages), and the returned model is the *global* best
-    validation checkpoint across all stages -- which may be an earlier, shorter
-    stage. Returns that global-best checkpoint path; the other stage checkpoints
-    are removed."""
+    Each stage warm-starts from the previous stage's last-epoch weights. The
+    returned model is the checkpoint chosen by ``select_curriculum_checkpoint``;
+    the other stage checkpoints are removed."""
     curriculum_cfg = config.get("curriculum", {})
     enabled = bool(curriculum_cfg.get("enabled", False))
     epochs_per_stage = int(curriculum_cfg.get("epochs_per_stage", config["max_epochs"]))
     staged = enabled and len(schedule) > 1
-    best_val = None
-    best_checkpoint = None
-    stage_checkpoints = []
+    stage_results = []
     print(f"\n=== Training: {label or checkpoint_name} ===")
     print(f"checkpoint_dir: {checkpoint_dir}")
     print(f"accelerator: {accelerator} | curriculum schedule: {schedule}")
@@ -314,20 +341,16 @@ def train_localization_curriculum(
             if checkpoint_cb.best_model_path
             else None
         )
-        if stage_best_path is not None:
-            stage_checkpoints.append(stage_best_path)
-        if stage_best_val is not None and (best_val is None or stage_best_val < best_val):
-            best_val = stage_best_val
-            best_checkpoint = stage_best_path
+        stage_results.append((stage_best_path, stage_best_val))
+    best_checkpoint = select_curriculum_checkpoint(stage_results)
     if best_checkpoint is None:
         raise RuntimeError("Training did not produce a best validation checkpoint.")
-    # Load the global-best checkpoint (across all stages) into the model.
     checkpoint = torch.load(best_checkpoint, map_location="cpu")
     model.load_state_dict(checkpoint["state_dict"])
-    # Remove intermediate stage checkpoints; keep the global best (returned so
+    # Remove the superseded stage checkpoints; keep the selected one (returned so
     # the caller can delete it after saving the final .pt).
-    for path in stage_checkpoints:
-        if path != best_checkpoint:
+    for path, _ in stage_results:
+        if path is not None and path != best_checkpoint:
             path.unlink(missing_ok=True)
     return best_checkpoint
 
@@ -604,16 +627,6 @@ def load_experiment_config(experiment_dir):
     return normalize_localization_config(_parse_run_log(path.read_text(encoding="utf-8")))
 
 
-def save_config(config, save_path):
-    path = Path(save_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_to_serializable(config), indent=2) + "\n", encoding="utf-8")
-
-
-def load_config(config_path):
-    return json.loads(Path(config_path).read_text(encoding="utf-8"))
-
-
 def plot_prediction_sample(
     graph, prediction, node_positions, title, label, save_path=None
 ):
@@ -697,83 +710,6 @@ def plot_trajectory_and_nodes(
     plt.grid(True, alpha=0.3)
     plt.legend(handles=[trajectory_handle, *sensor_legend_handles()])
     plt.show()
-
-
-def plot_tracking_results(
-    trajectory,
-    x_hat_cekf,
-    x_hat_dekf=None,
-    x_hat_dkn=None,
-    x_hat_gnn_rnn=None,
-    node_positions=None,
-    node_types=None,
-    save_path=None,
-    show=True,
-):
-    truth = trajectory.detach().cpu().numpy() if isinstance(trajectory, torch.Tensor) else trajectory
-    estimates = [("CEKF", x_hat_cekf[:, 0, 0], x_hat_cekf[:, 2, 0], "r--")]
-    if x_hat_dekf is not None:
-        estimates.append(
-            (
-                "DEKF",
-                x_hat_dekf[:, :, 0, 0].mean(axis=1),
-                x_hat_dekf[:, :, 2, 0].mean(axis=1),
-                "g:",
-            )
-        )
-    if x_hat_dkn is not None:
-        estimates.append(("DKN", x_hat_dkn[:, 0], x_hat_dkn[:, 2], "m-."))
-    if x_hat_gnn_rnn is not None:
-        estimates.append(("GNN-RNN", x_hat_gnn_rnn[:, 0], x_hat_gnn_rnn[:, 2], "y--"))
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    axes[0].plot(truth[:, 0, 0], truth[:, 2, 0], "b-", label="True trajectory")
-    for label, x_estimate, y_estimate, style in estimates:
-        error = np.sqrt(
-            (truth[:, 0, 0] - x_estimate) ** 2
-            + (truth[:, 2, 0] - y_estimate) ** 2
-        )
-        axes[0].plot(x_estimate, y_estimate, style, label=label)
-        axes[1].plot(error, label=f"{label} (mean: {error.mean():.4f})")
-    if node_positions is not None and node_types is not None:
-        for idx, position in enumerate(node_positions):
-            axes[0].plot(*position, "s", color=sensor_color(node_types[idx]))
-    axes[0].set(title="Trajectory Comparison", xlabel="x", ylabel="y")
-    axes[1].set(title="Estimation Error", xlabel="Time step", ylabel="Position error")
-    for axis in axes:
-        axis.grid(True, alpha=0.3)
-    trajectory_handles, trajectory_labels = axes[0].get_legend_handles_labels()
-    extra_handles = sensor_legend_handles() if node_types is not None else []
-    axes[0].legend(
-        handles=trajectory_handles + extra_handles,
-        labels=trajectory_labels + [handle.get_label() for handle in extra_handles],
-    )
-    axes[1].legend()
-    fig.tight_layout()
-    if save_path is not None:
-        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=200, bbox_inches="tight")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-
-
-def plot_learning_curve(log_dir, r_value, save_dir):
-    metrics = pd.read_csv(Path(log_dir) / "metrics.csv")
-    fig, axis = plt.subplots(figsize=(7, 5))
-    for column, label in (
-        ("train_loss_epoch", "Train Loss"),
-        ("val_loss_epoch", "Validation Loss"),
-    ):
-        if column in metrics:
-            values = metrics.dropna(subset=[column])
-            axis.plot(values["epoch"], values[column], marker="o", label=label)
-    axis.legend()
-    axis.grid(True)
-    save_path = Path(save_dir) / f"learning_curve_r={r_value}.png"
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
 
 
 def plot_generated_trajectories(

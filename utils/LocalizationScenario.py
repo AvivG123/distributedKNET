@@ -346,21 +346,6 @@ def build_dkn_model(config, f_model, r_array, x0):
     )
 
 
-def clean_measurements_for_trajectory(h_system, trajectory):
-    clean = np.zeros((h_system.num_nodes, 1, trajectory.shape[0]))
-    for time_idx in range(trajectory.shape[0]):
-        state = trajectory[time_idx]
-        state = state.numpy() if isinstance(state, torch.Tensor) else state
-        clean[:, 0, time_idx] = h_system.func(state)[:, 0]
-    return h_system.wrap_measurements(clean, sensor_axis=0)
-
-
-def measurement_snr_db(h_system, trajectory, measurements, eps=1e-12):
-    clean = clean_measurements_for_trajectory(h_system, trajectory)
-    noise = h_system.wrap_innovation(measurements - clean, sensor_axis=0)
-    return 10 * np.log10((np.mean(clean ** 2) + eps) / (np.mean(noise ** 2) + eps))
-
-
 def position_error_from_state_sequence(trajectory, estimate):
     truth = trajectory.detach().cpu().numpy() if isinstance(trajectory, torch.Tensor) else trajectory
     return np.sqrt(

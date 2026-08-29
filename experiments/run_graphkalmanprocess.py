@@ -31,6 +31,7 @@ from utils.DistributedKalmanNet import GraphKalmanProcess, loss_function
 from experiments.localization_experiment import (
     dkn_model_path,
     gnn_rnn_model_path,
+    load_experiment_config,
     normalize_localization_config,
     normalize_localization_train_models,
     run_localization_experiment,
@@ -436,6 +437,15 @@ def evaluate_on_graph(*, model: GraphKalmanProcess, cfg: dict, eval_cfg: dict) -
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train/sweep GraphKalmanProcess with simple hyperparam grids.")
     parser.add_argument("--localization", action="store_true", help="Run the localization DKN/GNN-RNN workflow.")
+    parser.add_argument(
+        "--from-experiment",
+        default=None,
+        help=(
+            "Reproduce a localization run: load its config from <dir>/run.log "
+            "instead of LOCALIZATION_BASELINE. Overrides then use the flat "
+            "run.log key names (e.g. r_scale=0.25)."
+        ),
+    )
     parser.add_argument("--preset", default="baseline", choices=sorted(PRESETS.keys()))
     parser.add_argument(
         "--override",
@@ -475,8 +485,17 @@ def main() -> None:
 
     root_dir = Path(args.root_dir).resolve()
 
+    if args.from_experiment and not args.localization:
+        raise ValueError("--from-experiment requires --localization.")
+
     if args.localization:
-        config_val = deepcopy(LOCALIZATION_BASELINE)
+        # run.log carries values the preset no longer matches (e.g. rho) plus the
+        # exact node positions.
+        config_val = (
+            load_experiment_config(Path(args.from_experiment))
+            if args.from_experiment
+            else deepcopy(LOCALIZATION_BASELINE)
+        )
         for ov in args.override:
             if "=" not in ov:
                 raise ValueError(f"Invalid --override {ov!r}; expected key=value")

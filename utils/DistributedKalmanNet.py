@@ -68,22 +68,6 @@ class StateKnowledge:
     x0: object
 
 
-@dataclass
-class ModelHyperparameters:
-    hidden_dim: int
-    learn_edge_kalman: bool
-    gcn_layer: str | None = None
-    learning_rate: float = 1e-3
-
-
-@dataclass
-class DataCharacteristics:
-    graph_number: int
-    node_number: int
-    time_steps_number: int
-    batch_size: int
-
-
 class EdgeKalmanFilter:
     def __init__(self, r_array, signal_dim, measurement_dim=1):
         r_tensor = torch.as_tensor(r_array, dtype=torch.float)
@@ -583,7 +567,6 @@ class GraphKalmanProcess(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
         return [optimizer], [scheduler]
-        # return optimizer
 
     def on_before_optimizer_step(self, optimizer: Optimizer) -> None:
         with torch.no_grad():

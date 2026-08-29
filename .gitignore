@@ -21,6 +21,7 @@ checkpoints/
 logs/
 lightning_logs/
 experiments/results/
+evaluations/results/
 tags
 .matplotlib-cache/
 .mplconfig/
